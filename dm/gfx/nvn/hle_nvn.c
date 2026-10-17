@@ -545,7 +545,10 @@ static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
     size = (size + 7) & ~7u;
     for (int tries = 0; !o->cur || o->cur + size + OP_RESERVE > o->end; tries++) {
         // The game's callback cannot supply enough (newer-SDK games hand out small chunks sized for real-device commands, or disable the callback and manage memory themselves): continue recording in a host segment instead of aborting
-        if (!o->cb || tries == 2) {
+        // DM_NVN_NO_CB=1: never call back into the game for command memory (base 逆转裁判123 freezes inside that
+        // guest callback on the first Start press); the host lends a segment instead
+        static int nocb = -1; if (nocb < 0) nocb = getenv("DM_NVN_NO_CB") != NULL;
+        if (!o->cb || nocb || tries == 2) {
             static int once; if (!once++) LOG("[nvn] 命令内存：游戏回调补不够（cb=%p，需 %u 字节），改用宿主补段", (void *)o->cb, size + OP_RESERVE);
             cmd_new_segment(o, hostseg_take(o), HOSTSEG_SZ); break;
         }
