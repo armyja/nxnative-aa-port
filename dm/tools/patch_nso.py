@@ -582,6 +582,35 @@ def jump_offsets(insl, j):
     sub w0,w18,#0xd1; cmp w0,#0x31; b.hi; ldrsw x18,[x17,x0,lsl #2], its movie module (subsdk1+0xae9a4) cmp w21,#7; b.hi; ...; mov w18,w21; ldrsw x18,[x4,x18,lsl #2].
     For the table base xB, search back for the nearest writer: it must be add xB,xB,#lo, and the writer before it must be adrp xB. Returns all targets, or None if not recognized"""
     ctx = insl[max(0, j - 16):j]
+    # Variant (Ace Attorney Trilogy main+0x16454fc): ldrsw xD,[xB,xD,lsl #2]; add x18,xD,xB; br x18
+    # (the offset lands in xD, and the base is the add's second source, not x18 itself)
+    for k in range(len(ctx) - 1, -1, -1):
+        p = ctx[k]
+        m = re.fullmatch(r'x18, (x\d+), (x\d+)', p.op_str) if p.mnemonic == 'add' else None
+        if not m or m.group(1) == m.group(2): continue
+        src, base = m.group(1), m.group(2)
+        ld = next((q for q in reversed(ctx[:k]) if q.mnemonic == 'ldrsw'
+                   and re.fullmatch(rf'{src}, \[{base}, {src}, lsl #2\]', q.op_str)), None)
+        if ld is None: continue
+        k0 = ctx.index(ld)
+        cmp = None
+        for q in range(k0 - 1, -1, -1):
+            if ctx[q].mnemonic == 'cmp' and re.fullmatch(rf'w{src[1:]}, #(0x[0-9a-f]+|\d+)', ctx[q].op_str):
+                cmp = ctx[q]; break
+        if cmp is None: continue
+        n = int(cmp.op_str.split('#')[1], 0) + 1
+        lo = page = None
+        for q in reversed(ctx[max(0, k0 - 256):k0]):
+            _, w = q.regs_access()
+            if not any(q.reg_name(r) == base for r in w): continue
+            if lo is None and q.mnemonic == 'add' and re.fullmatch(rf'{base}, {base}, #(0x[0-9a-f]+|\d+)', q.op_str):
+                lo = int(q.op_str.split('#')[1], 0); continue
+            if lo is not None and q.mnemonic == 'adrp' and q.op_str.startswith(base + ','):
+                page = q.operands[1].imm
+            break
+        if page is None or lo is None: continue
+        tb = page + lo
+        return [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
     add = next((p for p in reversed(ctx) if p.mnemonic == 'add' and re.fullmatch(r'x18, x18, x\d+', p.op_str)), None)
     if not add: return None
     rb = add.op_str.split(', ')[2]

@@ -1,0 +1,10 @@
+# generated from DM_NVN_SHDUMP
+package	index	stage	dm_ctl_sha16	source
+ps_dd.bin	0	像素	2240746aa60b8245	shdump
+ps_dd.bin	1	像素	500464d5387b1f3b	shdump
+ps_dd.bin	2	像素	888235fa55badc0a	shdump
+vs_dd.bin	0	顶点	a33b7935a15534bf	shdump
+vs_dd.bin	1	顶点	c5df7e10220fe006	shdump
+vs_dd.bin	2	顶点	c8103873a60dcc48	shdump
+vs_dd.bin	3	顶点	e4b55e4c08c07fee	shdump
+ps_dd.bin	3	像素	e9ce5eb945bd1b4c	shdump

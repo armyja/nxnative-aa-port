@@ -2305,6 +2305,7 @@ static NvShader *builtin_get(const char *ctl) {
     }
     return nil;
 }
+static int g_prog_stage_hint = -1;   // NVN stage slot of the program about to be resolved (set by bind_stages; otherwise the program's own index)
 static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only on the submit thread
     prog_t *p = (prog_t *)cp;
     static const prog_t *lp; static uint64_t lser, lgen; static NvProg *lpr;   // Last result: same object, same serial and unchanged serial table means it is used directly
@@ -2327,6 +2328,8 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
             static const char *shd; static int shd_init; if (!shd_init) { shd = getenv("DM_NVN_SHDUMP"); shd_init = 1; }
             if (shd) { char path[1024]; FILE *f; uint32_t ncode; memcpy(&ncode, (const uint8_t *)p->sd[i].control + 0x704, 4);   // with SHDUMP set the control section is the host's copy
                 snprintf(path, sizeof path, "%s/%s.ctl", shd, k.UTF8String); if ((f = fopen(path, "wb"))) { fwrite(p->sd[i].control, 1, 0x880, f); fclose(f); }
+                snprintf(path, sizeof path, "%s/%s.stage", shd, k.UTF8String);
+                if ((f = fopen(path, "wb"))) { static const char *const sn[6] = {"vs", "ps", "gs", "hs", "ds", "cs"}; fwrite(sn[(g_prog_stage_hint >= 0 ? g_prog_stage_hint : (int)i) % 6], 1, 2, f); fclose(f); }
                 snprintf(path, sizeof path, "%s/%s.code", shd, k.UTF8String);
                 if (p->sd[i].data && ncode && ncode < (1u << 24) && (f = fopen(path, "wb"))) { fwrite((const void *)(uintptr_t)p->sd[i].data, 1, ncode, f); fclose(f); } }
             continue;
@@ -2621,7 +2624,7 @@ static const prog_t *bind_stages(const prog_t *p, int stages) {
     int i = ncp < NCMP ? ncp++ : next++ % NCMP;
     if (cp[i].serial) serial_del(cp[i].serial);
     NvProg *o = [NvProg new];
-    for (int st = 0; st < 5; st++) { ck[i][st] = S.bst[st]; cs[i][st] = S.bst[st] ? S.bst[st]->serial : 0; if (S.bst[st]) { __unsafe_unretained NvProg *src = prog_get(S.bst[st]); o->sh[st] = src ? src->sh[st] : nil; } }
+    for (int st = 0; st < 5; st++) { ck[i][st] = S.bst[st]; cs[i][st] = S.bst[st] ? S.bst[st]->serial : 0; if (S.bst[st]) { g_prog_stage_hint = st; __unsafe_unretained NvProg *src = prog_get(S.bst[st]); g_prog_stage_hint = -1; o->sh[st] = src ? src->sh[st] : nil; } }
     memset(&cp[i], 0, sizeof cp[i]); cp[i].magic = MAGIC('P', 'R', 'O', 'G'); cp[i].serial = nvn_new_serial(); serial_put(cp[i].serial, o);
     { static int once; if (!once++) MLOG("按阶段绑程序：首个合成程序（顶点 %s 片元 %s）", o->sh[0] ? o->sh[0]->key : "-", o->sh[1] ? o->sh[1]->key : "-"); }
     return &cp[i];
@@ -6258,6 +6261,19 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         if (c) { shot_path = c + 1; for (const char *q = e; q < c && nshot < 4096; q = strchr(q, ',') ? strchr(q, ',') + 1 : c) shots[nshot++] = atol(q); }
     }
     for (int i = 0; i < nshot; i++) if ((long)g_present_n == shots[i]) { char path[1024]; snprintf(path, sizeof path, shot_path, (int)g_present_n); mtl_finish_gpu(); shot(src, path, 1, crop); }
+    {   // DM_SHOT=<frame>:<path>: one screenshot at that present frame (local debugging aid)
+        static int inited, taken; static uint64_t want; static char spath[1024];
+        if (!inited) { inited = 1; const char *e = getenv("DM_SHOT"); if (e) { const char *c = strchr(e, ':'); if (c) { want = strtoull(e, NULL, 10); strlcpy(spath, c + 1, sizeof spath); } } }
+        if (spath[0] && !taken && g_present_n >= want) { taken = 1; mtl_finish_gpu(); shot(src, spath, 1, crop); MLOG("【截图】%s 帧 %llu", spath, (unsigned long long)g_present_n); }
+        static int rinited, rtaken; static uint64_t rwant; static char rpath[1024];
+        if (!rinited) { rinited = 1; const char *e = getenv("DM_SHOT_RAW"); if (e) { const char *c = strchr(e, ':'); if (c) { rwant = strtoull(e, NULL, 10); strlcpy(rpath, c + 1, sizeof rpath); } } }
+        if (rpath[0] && !rtaken && g_present_n >= rwant) { rtaken = 1; shot(src, rpath, 0, crop); MLOG("【截图-原始】%s 帧 %llu %zux%zu", rpath, (unsigned long long)g_present_n, src.width, src.height); }
+        static int sinited, staken; static uint64_t swant, sser; static char spath2[1024];
+        if (!sinited) { sinited = 1; const char *e = getenv("DM_SHOT_SER"); if (e) { unsigned long long sv = 0, fv = 0; int n = sscanf(e, "%llu:%llu:%1023s", &sv, &fv, spath2); if (n == 3) { sser = sv; swant = fv; } else if (n == 2) { sser = sv; swant = 0; spath2[0] = 0; } } }
+        if (spath2[0] && !staken && g_present_n >= swant) { staken = 1; __unsafe_unretained id t = serial_get(sser);
+            if (t && [t conformsToProtocol:@protocol(MTLTexture)]) { id<MTLTexture> tx = (id<MTLTexture>)t; shot(tx, spath2, 0, crop); MLOG("【截图-序列】ser=%llu %s 帧 %llu %zux%zu", (unsigned long long)sser, spath2, (unsigned long long)g_present_n, tx.width, tx.height); }
+            else MLOG("【截图-序列】ser=%llu 不是贴图或不存在", (unsigned long long)sser); }
+    }
     pthread_mutex_lock(&g_shotq_mu);
     for (int i = 0; i < g_nshotq;) if (g_present_n >= g_shotq[i].frame) { mtl_finish_gpu(); shot(src, g_shotq[i].path, 1, crop); g_shotq[i] = g_shotq[--g_nshotq]; } else i++;
     pthread_mutex_unlock(&g_shotq_mu);
