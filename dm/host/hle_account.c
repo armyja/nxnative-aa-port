@@ -30,6 +30,11 @@ HLE_FORCE("_ZN2nn7account12PopOpenUsersEPiPNS0_10UserHandleEi", "系统代开的
 HLE_FORCE("_ZN2nn7account22TryOpenPreselectedUserEPNS0_10UserHandleE", "启动时预选用户；恒为本地用户（返回 bool）", unsigned, h_acc_TryOpenPre, UserHandle *h) {
     h->v[0] = k_uid.v[0]; h->v[1] = k_uid.v[1]; h->v[2] = HANDLE_MAGIC; return 1;
 }
+// Ace Attorney Trilogy (SDK 5) opens the preselected user on the "press A" screen; the SDK aborts with an empty
+// message when this is missing (SIGTRAP through nn::diag::detail::OnAssertionFailure).
+HLE_FORCE("_ZN2nn7account19OpenPreselectedUserEPNS0_10UserHandleE", "预选用户（返回 Result）；恒为本地用户", Result, h_acc_OpenPre, UserHandle *h) {
+    h->v[0] = k_uid.v[0]; h->v[1] = k_uid.v[1]; h->v[2] = HANDLE_MAGIC; return RES_OK;
+}
 HLE_FORCE("_ZN2nn7account8OpenUserEPNS0_10UserHandleERKNS0_3UidE", "打开用户；句柄内直接存 Uid", Result, h_acc_OpenUser, UserHandle *h, const Uid *uid) {
     h->v[0] = uid->v[0]; h->v[1] = uid->v[1]; h->v[2] = HANDLE_MAGIC; return RES_OK;
 }
