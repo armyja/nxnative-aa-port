@@ -278,14 +278,14 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
         if (g_mnt[i].overlay[0] && !create) return rom_overlay_path(&g_mnt[i], rest, out, n);
         strlcpy(out, g_mnt[i].dir, n);
         while (*rest) {
-            while (*rest == '/') rest++;
+            while (*rest == '/' || *rest == '\\') rest++;   // Horizon accepts both separators (Ace Attorney opens "savedata:\systemdata")
             if (!*rest) break;
-            const char *end = strchr(rest, '/'); if (!end) end = rest + strlen(rest);
+            const char *end = rest + strcspn(rest, "/\\");
             size_t k = end - rest; char part[0x301];
             if (k >= sizeof part) { errno = ENAMETOOLONG; return 0; }
             memcpy(part, rest, k); part[k] = 0;
             if (!strcmp(part, "..")) { errno = ENOENT; return 0; }
-            const char *next = end; while (*next == '/') next++;
+            const char *next = end; while (*next == '/' || *next == '\\') next++;
             if (strcmp(part, ".") && !path_component(out, n, part, create && !*next, g_mnt[i].ro)) return 0;
             rest = end;
         }
