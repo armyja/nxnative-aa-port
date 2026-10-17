@@ -2,6 +2,7 @@
 // Without DM_WINDOW: the guest runs directly on the current thread, behaving the same as with no front end (windowless tests use this).
 // Key map (Nintendo layout): WASD left stick, arrow keys D-pad, J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−.
 #import <Cocoa/Cocoa.h>
+#import <GameController/GameController.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #include "dm.h"
@@ -26,6 +27,38 @@ uint64_t front_game_res(int docked) {
     return docked ? 900ull << 32 | 1600 : 720ull << 32 | 1280;
 }
 
+// Physical controller (Xbox / DualSense / ...): GameController framework, polled from the main thread.
+// Nintendo layout vs the pad's own: A (bottom) = confirm, B (right) = cancel -- the same as the keyboard map.
+static void pad_poll(void) {
+    uint64_t b = 0; int32_t lx = 0, ly = 0, rx = 0, ry = 0;
+    NSArray<GCController *> *cs = [GCController controllers];
+    static long last_n = -1; if ((long)cs.count != last_n) { last_n = (long)cs.count; LOG("[手柄] 当前 %ld 个：%s", last_n, last_n ? [[[cs firstObject] vendorName] UTF8String] ?: "?" : "无"); }
+    for (GCController *c in cs) {
+        GCExtendedGamepad *p = c.extendedGamepad; if (!p) continue;
+        if (p.buttonA.isPressed) b |= 1ull << 0;
+        if (p.buttonB.isPressed) b |= 1ull << 1;
+        if (p.buttonX.isPressed) b |= 1ull << 2;
+        if (p.buttonY.isPressed) b |= 1ull << 3;
+        if (p.leftThumbstickButton.isPressed) b |= 1ull << 4;
+        if (p.rightThumbstickButton.isPressed) b |= 1ull << 5;
+        if (p.leftShoulder.isPressed) b |= 1ull << 6;
+        if (p.rightShoulder.isPressed) b |= 1ull << 7;
+        if (p.leftTrigger.isPressed) b |= 1ull << 8;
+        if (p.rightTrigger.isPressed) b |= 1ull << 9;
+        if (p.buttonMenu.isPressed) b |= 1ull << 10;
+        if (p.buttonOptions.isPressed) b |= 1ull << 11;
+        if (p.dpad.left.isPressed) b |= 1ull << 12;
+        if (p.dpad.up.isPressed) b |= 1ull << 13;
+        if (p.dpad.right.isPressed) b |= 1ull << 14;
+        if (p.dpad.down.isPressed) b |= 1ull << 15;
+        lx = (int32_t)(p.leftThumbstick.xAxis.value * 32767.0f);
+        ly = (int32_t)(p.leftThumbstick.yAxis.value * 32767.0f);
+        rx = (int32_t)(p.rightThumbstick.xAxis.value * 32767.0f);
+        ry = (int32_t)(p.rightThumbstick.yAxis.value * 32767.0f);
+        break;
+    }
+    dm_pad_set(b, lx, ly, rx, ry);
+}
 static void push(void) {
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
     dm_input_set(g_btn, lx, ly, 0, 0);
@@ -75,6 +108,8 @@ void front_run(void (*guest)(void)) {
         [win center];
         [win makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
+        [GCController startWirelessControllerDiscoveryWithCompletionHandler:nil];
+        [NSTimer scheduledTimerWithTimeInterval:1.0 / 120.0 repeats:YES block:^(NSTimer *t) { (void)t; pad_poll(); }];
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);

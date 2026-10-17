@@ -202,9 +202,9 @@ static int path_component(char *parent, size_t n, const char *name, int create, 
 static int root_path(const char *root, const char *rest, char *out, size_t n) {
     strlcpy(out, root, n);
     while (*rest) {
-        while (*rest == '/') rest++;
+        while (*rest == '/' || *rest == '\\') rest++;   // Horizon accepts both separators (Ace Attorney writes "savedata:\systemdata")
         if (!*rest) break;
-        const char *end = strchr(rest, '/'); if (!end) end = rest + strlen(rest);
+        const char *end = rest + strcspn(rest, "/\\");
         size_t k = end - rest; char part[0x301];
         if (k >= sizeof part) { errno = ENAMETOOLONG; return 0; }
         memcpy(part, rest, k); part[k] = 0;
@@ -248,9 +248,9 @@ static int rom_overlay_path(const mount_t *m, const char *rest, char *out, size_
 static int norm_rest(const char *rest, char *out, size_t n) {
     size_t len = 0; out[0] = 0;
     while (*rest) {
-        while (*rest == '/') rest++;
+        while (*rest == '/' || *rest == '\\') rest++;   // Horizon accepts both separators (Ace Attorney writes "savedata:\systemdata")
         if (!*rest) break;
-        const char *end = strchr(rest, '/'); if (!end) end = rest + strlen(rest);
+        const char *end = rest + strcspn(rest, "/\\");
         size_t k = end - rest;
         if (k == 2 && rest[0] == '.' && rest[1] == '.') {
             if (!len) { errno = ENOENT; return 0; }
