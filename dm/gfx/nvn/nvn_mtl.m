@@ -6263,8 +6263,21 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     for (int i = 0; i < nshot; i++) if ((long)g_present_n == shots[i]) { char path[1024]; snprintf(path, sizeof path, shot_path, (int)g_present_n); mtl_finish_gpu(); shot(src, path, 1, crop); }
     {   // DM_SHOT=<frame>:<path>: one screenshot at that present frame (local debugging aid)
         static int inited, taken; static uint64_t want; static char spath[1024];
-        if (!inited) { inited = 1; const char *e = getenv("DM_SHOT"); if (e) { const char *c = strchr(e, ':'); if (c) { want = strtoull(e, NULL, 10); strlcpy(spath, c + 1, sizeof spath); } } }
-        if (spath[0] && !taken && g_present_n >= want) { taken = 1; mtl_finish_gpu(); shot(src, spath, 1, crop); MLOG("【截图】%s 帧 %llu", spath, (unsigned long long)g_present_n); }
+        static int nshot_s; static const char *shotlist; static const char *shotp;
+        if (!inited) { inited = 1; shotlist = getenv("DM_SHOT"); }
+        while (shotlist && *shotlist) {   // DM_SHOT=frame:path[,frame:path...]: several screenshots in one run
+            if (!shotp) {
+                const char *c = strchr(shotlist, ':');
+                if (!c) { shotlist = NULL; break; }
+                want = strtoull(shotlist, NULL, 10);
+                size_t n = 0; const char *q = c + 1; while (q[n] && q[n] != ',') n++;
+                if (n >= sizeof spath) n = sizeof spath - 1;
+                memcpy(spath, q, n); spath[n] = 0; shotp = q + n; shotlist = (*shotp == ',') ? shotp + 1 : shotp;
+            }
+            if (g_present_n < want) break;
+            mtl_finish_gpu(); shot(src, spath, 1, crop); MLOG("【截图】%s 帧 %llu", spath, (unsigned long long)g_present_n);
+            nshot_s++; shotp = NULL;
+        }
         static int rinited, rtaken; static uint64_t rwant; static char rpath[1024];
         if (!rinited) { rinited = 1; const char *e = getenv("DM_SHOT_RAW"); if (e) { const char *c = strchr(e, ':'); if (c) { rwant = strtoull(e, NULL, 10); strlcpy(rpath, c + 1, sizeof rpath); } } }
         if (rpath[0] && !rtaken && g_present_n >= rwant) { rtaken = 1; shot(src, rpath, 0, crop); MLOG("【截图-原始】%s 帧 %llu %zux%zu", rpath, (unsigned long long)g_present_n, src.width, src.height); }

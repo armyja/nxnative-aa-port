@@ -104,6 +104,13 @@ HLE_FORCE("_ZN2nn3err40ShowUnacceptableAddOnContentVersionErrorEv", "追加内�
 HLE_FORCE("_ZN2nn3err39ShowUnacceptableApplicationVersionErrorEv", "游戏版本不符错误小程序；宿主只记日志", void, h_err_AppVer, void) { LOG("游戏请求显示错误：游戏版本不符"); }
 
 // ---------- web: web page applet (online lobby). Unavailable ----------
+// Ace Attorney Trilogy shows its privacy policy through this library applet on first start (the "Details" button).
+// Without it the SDK's ShowWebPage dereferences the applet handle it never got (SIGSEGV in
+// nn::applet::StartLibraryAppletImmediately) and pressing Details kills the process; the host has no web applet,
+// so report "closed" and let the game treat the policy as seen.
+HLE_FORCE("_ZN2nn3web11ShowWebPageEPNS0_18WebPageReturnValueERKNS0_14ShowWebPageArgE", "隐私政策网页小程序：宿主无浏览器，直接返回已关闭", Result, h_web_Show, void *rv, const void *arg) {
+    (void)arg; if (rv) memset(rv, 0, 0x10); LOG("web::ShowWebPage（宿主无浏览器，按已关闭返回）"); return RES_OK;
+}
 HLE_FORCE("_ZN2nn3web13ShowLobbyPageEPNS0_20LobbyPageReturnValueERKNS0_16ShowLobbyPageArgE", "联机大厅网页小程序（剪）", Result, h_web_Lobby, void *rv, const void *arg) { (void)rv; (void)arg; LOG("web::ShowLobbyPage（剪）"); return RES_FAIL; }
 
 // ---------- C interface (nnsocket* / nnssl*): offline as well. The arguments are all in registers and the host does not look at them ----------
