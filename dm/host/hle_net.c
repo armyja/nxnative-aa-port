@@ -322,6 +322,20 @@ static void aa_keep_text_writable(void) {
 }
 void aa_call_save_probe(void) {
     aa_keep_text_writable();
+    // Debug probe: is CultureInfo.CurrentCulture null in the guest? (the save coroutine dies inside DateTime.ToString)
+    {
+        static int done; const char *e = getenv("DM_AA_PROBE_CULTURE");
+        extern uint64_t dm_guest_frame(void);
+        if (e && !done && dm_guest_frame() >= (uint64_t)atoi(e)) {
+            done = 1;
+            module_t *m = aa_main_module();
+            if (m && !strcmp(m->build_id, "c5b5d28842207c47bd0fc97137e5e75f")) {
+                uint64_t cur = ((uint64_t (*)(void))(m->base + 0x97e0a0))();
+                uint64_t inv = ((uint64_t (*)(void))(m->base + 0x97e020))();
+                LOG("[aa] culture 探测：CurrentCulture=%#llx InvariantCulture=%#llx", (unsigned long long)cur, (unsigned long long)inv);
+            }
+        }
+    }
     // Poll the save coroutine's state machine: if Unity ever calls MoveNext again the state changes; if it stays 1
     // forever, Unity really dropped the coroutine (that is the current situation)
     if (g_aa_coro_iter) {
