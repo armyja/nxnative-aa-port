@@ -1,6 +1,7 @@
 // Networking (out of scope: online play/friends/store/cloud saves): all hooked up as "network unavailable", the game takes the offline branch.
 // Cuts: nifm reports no network; socket only hooks up Initialize (returns success, creates no session), the rest of socket/ssl/friends are hooked up as failures when they come into use.
 #include "hle.h"
+#include <sys/mman.h>
 
 HLE_FORCE("_ZN2nn6socket10InitializeERKNS0_6ConfigE", "连 bsd 套接字服务；离线，不建会话（剪）", Result, h_socket_Initialize, const void *cfg) { (void)cfg; return RES_OK; }
 // Ace Attorney 123 (SDK 5.5): with the privacy policy accepted, the save flow waits for Unity's network-platform
@@ -90,6 +91,11 @@ static void aa_gate_uissaveload(const uint64_t *r) { LOG("[aa] SaveLoadUICtrl.Co
 // coroutine (<CoroutineSave>c__Iterator4) is ever started at the press
 extern uint64_t g_meta_buf;
 // GameObject.SetActive(this, active): log only around the save press, so the log stays readable
+static void aa_gate_save_branch(const uint64_t *r) {
+    if (!getenv("DM_AALOG")) return;
+    extern uint64_t dm_guest_frame(void);
+    LOG("[aa] 存档协程分支：枚举=%lld（帧%llu this=%#llx）", (long long)(int32_t)r[8], (unsigned long long)dm_guest_frame(), (unsigned long long)r[19]);
+}
 static void aa_gate_setactive(const uint64_t *r) {
     if (!getenv("DM_AALOG")) return;
     extern uint64_t dm_guest_frame(void);
@@ -201,6 +207,7 @@ __attribute__((constructor)) static void aa_obs_gates(void) {
     gate_obs_set(OBS_AA_SETACTIVE, aa_gate_setactive);
     gate_obs_set(OBS_AA_STOPCORO, aa_gate_stopcoro);
     gate_obs_set(OBS_AA_STOPALL, aa_gate_stopall);
+    gate_obs_set(OBS_AA_SAVE_BRANCH, aa_gate_save_branch);
 }
 void aa_net_publish_init(void) {
     static int off = -1; if (off < 0) off = getenv("DM_NET_NOHOOK") != NULL; if (off) return;
@@ -220,7 +227,18 @@ HLE_FORCE("_ZN2nn4nifm20CancelNetworkRequestEv", "离线：无请求可取消", 
 HLE_FORCE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", "离线：请求不在等待中", int, h_nifm_OnHold, void) { aa_net_publish_init(); return 0; }
 // Probe: call the game's own C# save request from the host at a given frame (bypassing the stuck save menu), to tell
 // "the menu never calls it" apart from "the save code itself is broken". DM_AA_CALL_SAVE=<frame>:<slot>
+// DM_TEXT_WRITABLE keeps the guest text writable for a debugger: the loader's later mprotect calls put the text back
+// to RX, so re-apply RWX periodically while debugging (harmless when no debugger is attached)
+static void aa_keep_text_writable(void) {
+    static int on = -1, tick;
+    if (on < 0) on = getenv("DM_TEXT_WRITABLE") != NULL;
+    if (!on) return;
+    if (++tick % 60) return;
+    module_t *m = aa_main_module();
+    if (m) mprotect(m->base, 0x2afc000, PROT_READ | PROT_WRITE | PROT_EXEC);
+}
 void aa_call_save_probe(void) {
+    aa_keep_text_writable();
     // Poll the save coroutine's state machine: if Unity ever calls MoveNext again the state changes; if it stays 1
     // forever, Unity really dropped the coroutine (that is the current situation)
     if (g_aa_coro_iter) {
