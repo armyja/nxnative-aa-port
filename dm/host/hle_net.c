@@ -37,6 +37,44 @@ static void aa_gate_msgset(const uint64_t *r) { LOG("[aa] Mess_window_set"); aa_
 static void aa_gate_save_game2(const uint64_t *r) { LOG("[aa] SaveGameData"); aa_save_gate(r); }
 static void aa_gate_tempdata(const uint64_t *r) { LOG("[aa] tempDataSet"); aa_save_gate(r); }
 static void aa_gate_issave(const uint64_t *r) { LOG("[aa] get_is_save_"); aa_save_gate(r); }
+static void aa_gate_uiconf(const uint64_t *r) { LOG("[aa] SaveLoadUICtrl.SaveConfirmation"); aa_save_gate(r); }
+static void aa_gate_corosave(const uint64_t *r) { LOG("[aa] SaveConfirmationWindow.CoroutineSave"); aa_save_gate(r); }
+static void aa_gate_corosaveanim(const uint64_t *r) { LOG("[aa] CoroutineSaveAnim"); aa_save_gate(r); }
+static void aa_gate_openwin(const uint64_t *r) { LOG("[aa] SaveConfirmationWindow.OpenWindow"); aa_save_gate(r); }
+static void aa_gate_loadplay(const uint64_t *r) { LOG("[aa] LoadingPlay"); aa_save_gate(r); }
+static void aa_gate_loadwait(const uint64_t *r) { LOG("[aa] LoadingWait"); aa_save_gate(r); }
+static void aa_gate_uissaveload(const uint64_t *r) { LOG("[aa] SaveLoadUICtrl.CoroutineSaveLoad"); aa_save_gate(r); }
+// StartCoroutine(this, routine): log the iterator class when it is save related -- tells us whether the save
+// coroutine (<CoroutineSave>c__Iterator4) is ever started at the press
+extern uint64_t g_meta_buf;
+static void aa_gate_corosave_next(const uint64_t *r) {
+    if (!getenv("DM_AALOG")) return;
+    extern uint64_t dm_guest_frame(void);
+    LOG("[aa] CoroutineSave.MoveNext 帧%llu this=%#llx state=%d", (unsigned long long)dm_guest_frame(),
+        (unsigned long long)r[0], (int)*(volatile int32_t *)(uintptr_t)(r[0] + 0x10));
+    aa_save_gate(r);
+}
+static void aa_gate_coroanim_next(const uint64_t *r) {
+    if (!getenv("DM_AALOG")) return;
+    extern uint64_t dm_guest_frame(void);
+    LOG("[aa] CoroutineSaveAnim.MoveNext 帧%llu", (unsigned long long)dm_guest_frame());
+}
+static void aa_gate_startcoro(const uint64_t *r) {
+    if (!getenv("DM_AALOG")) return;
+    uint64_t it = r[1];
+    if (!it || !g_meta_buf) return;
+    uint64_t klass = *(volatile uint64_t *)(uintptr_t)it;
+    if (!klass) return;
+    uint64_t np = *(volatile uint64_t *)(uintptr_t)(klass + 0x10);
+    uint64_t lo = g_meta_buf + 0x45e14, hi = lo + 0xe42b4;
+    if (np < lo || np >= hi) return;
+    char nm[96]; int i = 0;
+    for (; i < 95; i++) { char c = *(volatile char *)(uintptr_t)(np + i); if (!c) break; nm[i] = c; }
+    nm[i] = 0;
+    if (!strstr(nm, "Save") && !strstr(nm, "save")) return;
+    extern uint64_t dm_guest_frame(void);
+    LOG("[aa] StartCoroutine 帧%llu %s", (unsigned long long)dm_guest_frame(), nm);
+}
 static void aa_gate_settext(const uint64_t *r) {
     if (!getenv("DM_AALOG")) return;
     const volatile uint8_t *sp = (const volatile uint8_t *)(uintptr_t)r[1];
@@ -74,6 +112,16 @@ __attribute__((constructor)) static void aa_obs_gates(void) {
     gate_obs_set(OBS_AA_SAVE_GAME2, aa_gate_save_game2);
     gate_obs_set(OBS_AA_TEMPDATA, aa_gate_tempdata);
     gate_obs_set(OBS_AA_ISSAVE, aa_gate_issave);
+    gate_obs_set(OBS_AA_UICONF, aa_gate_uiconf);
+    gate_obs_set(OBS_AA_COROSAVE, aa_gate_corosave);
+    gate_obs_set(OBS_AA_COROSAVEANIM, aa_gate_corosaveanim);
+    gate_obs_set(OBS_AA_OPENWIN, aa_gate_openwin);
+    gate_obs_set(OBS_AA_LOADPLAY, aa_gate_loadplay);
+    gate_obs_set(OBS_AA_LOADWAIT, aa_gate_loadwait);
+    gate_obs_set(OBS_AA_UI_SAVELOAD, aa_gate_uissaveload);
+    gate_obs_set(OBS_AA_STARTCORO, aa_gate_startcoro);
+    gate_obs_set(OBS_AA_COROSAVE_NEXT, aa_gate_corosave_next);
+    gate_obs_set(OBS_AA_COROANIM_NEXT, aa_gate_coroanim_next);
 }
 void aa_net_publish_init(void) {
     static int off = -1; if (off < 0) off = getenv("DM_NET_NOHOOK") != NULL; if (off) return;

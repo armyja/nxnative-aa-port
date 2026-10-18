@@ -43,6 +43,7 @@ static void path_unlock(pthread_mutex_t **m) { pthread_mutex_unlock(*m); }
 #define PATH_LOCK() pthread_mutex_t *path_guard __attribute__((cleanup(path_unlock))) = &g_path_lock; pthread_mutex_lock(path_guard)
 static uint8_t g_fmode[65536];              // fd → open mode
 static uint8_t g_fsave[65536];              // fd → whether it is on a transactional save mount (the save write injection point only counts these)
+uint64_t g_meta_buf;   // guest address of global-metadata.dat (read at boot): lets gates resolve C# class names
 static char g_fdname[4096][48];   // fd -> basename of the opened path (read instrumentation: which file went where)
 static _Atomic int g_save_writes;           // number of writes on the save mount (shared by the injection point and the commit log)
 static _Atomic uint64_t g_txn_first_ns;     // time of this transaction's first save write (used by the commit log to report timing; cleared to 0 at commit)
@@ -610,7 +611,8 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) {
     if (!h) { *out = 0; return RES_FAIL; }
     if (g_flag.fs && (int)h < 4096 && g_fdname[h][0] && (off == 0 || sz >= (64u << 10)))
-        LOG("fs 读 %s off=%lld sz=%zu → buf=%p", g_fdname[h], (long long)off, sz, buf);   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
+        LOG("fs 读 %s off=%lld sz=%zu → buf=%p", g_fdname[h], (long long)off, sz, buf);
+    if ((int)h < 4096 && g_fdname[h][0] && !strcmp(g_fdname[h], "global-metadata.dat") && off == 0) g_meta_buf = (uint64_t)(uintptr_t)buf;   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
     size_t got = 0; uint64_t t0 = g_flag.bootprof ? now_ns() : 0;
     dm_guest_write_prepare(buf, sz);   // The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first
     while (got < sz) {

@@ -179,6 +179,17 @@ OBS = {
     (0x3366e0, 29, 'f81e0ff3', 'AA：SaveControl.SaveGameData 入口（类方法表对齐后的准确地址）'),
     (0x3351e0, 30, 'f81c0ff7', 'AA：SaveControl.tempDataSet 入口'),
     (0x334b60, 31, 'a9be4ff4', 'AA：SaveControl.get_is_save_ 入口'),
+    # save UI script (classes recovered with the corrected heap range: SaveLoadUICtrl / SaveConfirmationWindow)
+    (0x337c30, 32, 'a9be4ff4', 'AA：SaveLoadUICtrl.SaveConfirmation 入口（按 A 确认存档槽）'),
+    (0x333c80, 33, 'a9be4ff4', 'AA：SaveConfirmationWindow.CoroutineSave 入口（真正发起存档的协程）'),
+    (0x333b70, 34, 'a9be4ff4', 'AA：SaveConfirmationWindow.CoroutineSaveAnim 入口'),
+    (0x333540, 35, 'f81c0ff7', 'AA：SaveConfirmationWindow.OpenWindow 入口（弹出正在存档对话框）'),
+    (0x333ae0, 36, 'f81d0ff5', 'AA：SaveConfirmationWindow.LoadingPlay 入口'),
+    (0x333be0, 37, 'a9be4ff4', 'AA：SaveConfirmationWindow.LoadingWait 入口'),
+    (0x338280, 38, 'a9be4ff4', 'AA：SaveLoadUICtrl.CoroutineSaveLoad 入口'),
+    (0x8ee940, 39, 'f81d0ff5', 'AA：MonoBehaviour.StartCoroutine 入口（记录存档相关协程的启动）'),
+    (0x334400, 40, 'd101c3ff', 'AA：<CoroutineSave>c__Iterator4.MoveNext（存档协程体）'),
+    (0x334cb0, 41, 'f81d0ff5', 'AA：<CoroutineSaveAnim>c__Iterator3.MoveNext（存档动画协程体）'),
   ],
   # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
   # On hardware the dispatcher thread (priority 30, core 0 only) preempts the main thread (priority 44, core 0) at once and finishes first; the host waits for the ring to empty after each post (hle_movie.c movie_ring_wait). The gates sit on the add x22, x22, #8 after the bl
