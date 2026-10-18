@@ -185,6 +185,30 @@ def unity_shaders(d, label, out, trees):
                 code = unityfs.subprogram(sp)[4]
                 out.extend((where, st, ctl, cd) for st, ctl, cd in unity_program(code, where))
 
+def sdf_shaders(d, label, out):
+    """RE Engine .sdf (Switch): every compiled program is a 0x880-byte control section immediately followed by its code area, repeated
+    (control magic +0x704 = code area length, verified for each one). The stage of a graphics program is SPH word 0 bits 10..13
+    (1 vertex 2 hull 3 domain 4 geometry 5 pixel, the BAHS convention); compute code areas carry magic 0x12345679. Everything else in
+    the file (the SDF header and its tables) is ignored: the pair table comes from shader_separable, because an .sdf groups the
+    permutations of one shader definition rather than explicit vertex / pixel pairs."""
+    i = 0
+    while True:
+        i = d.find(CTL_MAGIC, i)
+        if i < 0 or i + 0x880 > len(d): return
+        ctl = d[i:i + ctl_len(d[i:i + 0x880])]
+        code = d[i + len(ctl):]
+        if len(code) < 0x38 or code[:4] not in (GFX_MAGIC, CS_MAGIC): i += 1; continue
+        clen = struct.unpack_from('<I', ctl, 0x704)[0]
+        if clen <= 0 or clen > len(code): i += 1; continue
+        code = code[:clen]
+        if code[:4] == CS_MAGIC: st = 'cs'
+        else: st = SPH_STAGE.get((struct.unpack_from('<I', code, 0x30)[0] >> 10) & 0xf)
+        if st is None: i += 1; continue
+        bad = check(f'{label}#sdf@{i:#x}', st, ctl, code)
+        if bad: red(f'{label}#sdf@{i:#x}：{bad}')
+        out.append((f'{label}#sdf@{i:#x}', st, ctl, code))
+        i += len(ctl) + clen   # programs never overlap; jump past this one
+
 def scan_blob(d, label, out):
     if d[:4] == b'Yaz0': d = yaz0(d)
     if d[:4] == b'SARC':
@@ -192,6 +216,7 @@ def scan_blob(d, label, out):
         return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
     if d[:4] == b'MSHD': out.extend(mshd_shaders(d, label)); return
+    if d[:4] == b'SDF\0': sdf_shaders(d, label, out); return
     for m in re.finditer(b'BNSH\0\0\0\0', d):
         size = struct.unpack_from('<I', d, m.start() + 0x1c)[0]
         if m.start() + size <= len(d) and d[m.start() + 0x60:m.start() + 0x64] == b'grsc': out.extend(bnsh_shaders(d, m.start(), label))
@@ -234,7 +259,7 @@ def scan_file(args):
         import unityfs
         try: unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and not (d[:4] == b'SARC' and b'Yaz0' in d): return rel, {}, set(), {}   # a SARC may hold Yaz0 members
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'SDF\0' and not (d[:4] == b'SARC' and b'Yaz0' in d): return rel, {}, set(), {}   # a SARC may hold Yaz0 members
     else: scan_blob(d, '/' + rel, found)
     uniq = {}
     for where, st, ctl, code in found:

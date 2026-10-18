@@ -21,7 +21,10 @@ provide or explain how to obtain either. Not affiliated with Nintendo or any gam
    - Opens `secure` / `normal` partitions, reads the NACP from the control NCA for title id, name and icon.
    - `--info` lists the NCAs, `--no-exefs` extracts only the RomFS.
 
-3. **Provisional profiles** for `0100CB000A142000` (working) and `010020D01B890000` (research only:
+3. **Bring-up notes**: [docs/aa456-bringup.md](docs/aa456-bringup.md) records the analysis of a second
+   title (RE Engine) that is not running yet.
+
+4. **Provisional profiles** for `0100CB000A142000` (working) and `010020D01B890000` (research only:
    the RE Engine title still aborts during its startup memory-pool setup).
 
 ## Building and running (Ace Attorney 123)

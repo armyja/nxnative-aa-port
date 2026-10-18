@@ -1,2 +1,2 @@
-// 临时：尚未生成着色器库链，先用占位版本号，起机测试用 | provisional, no shader library yet
-#define DMSH_CHAIN "000000000000"
+// 生成文件（dm/gfx/tools/dmsh_chain.py --header，游戏 010020D01B890000）：本源码树期望的 B 着色器库翻译链版本（缺省选项）；宿主只加载 <库目录>/b-<V>/
+#define DMSH_CHAIN "14c1bf50f7a0"

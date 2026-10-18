@@ -35,8 +35,11 @@ nvn_img_slots	8
 nvn_ssbo_bases	vs=0x110 ps=0x510 cs=0x310
 
 # ---- Shader split ----
-shader_groups	/re_chunk_000.pak=root
-shader_note	Apollo Justice: Ace Attorney Trilogy (provisional, RE Engine)
+# RE Engine ships its compiled NVN programs inside the .sdf shader definitions in re_chunk_000.pak (control section 0x880 + code area,
+# stage from SPH word 0 bits 10..13); dm/tools/repak.py extracts the .sdf files, shader_split.py reads them.
+shader_groups	sdf=re
+shader_separable	on
+shader_note	Apollo Justice: Ace Attorney Trilogy (RE Engine: .sdf in re_chunk_000.pak)
 
 device_api	53.313
 zip_store	.pak

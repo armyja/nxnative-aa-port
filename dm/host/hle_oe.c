@@ -75,6 +75,20 @@ HLE_FORCE("_ZN2nn2oe21TryPopLaunchParameterEPmPvm", "启动参数：没有", uns
 HLE_FORCE("_ZN2nn2oe16DisableRecordingEv", "录像开关；宿主无系统录像", void, h_oe_DisableRec, void) {}
 HLE_FORCE("_ZN2nn2oe16EnableScreenShotEv", "截图开关；宿主无系统截图", void, h_oe_EnableShot, void) {}
 HLE_FORCE("_ZN2nn2oe17DisableScreenShotEv", "截图开关；宿主无系统截图", void, h_oe_DisableShot, void) {}
+// nn::album / capsrv (the system album and screen-capture service). The host has no capture service, so the SDK's album library must not be brought up:
+// nn::album::Initialize ends in LibraryState::EnsureAlbumAvailable, which calls capsrv::InitializeForApplication and AbortImpl's on a non-zero result.
+// RE Engine calls album::Initialize at startup (nnMain+0x2c278a0 → sdk+0x1a8a38 → sdk+0x1404bc in nn::sm::Initialize, after ConnectToNamedPort 'capsrv:').
+// Album operations report failure instead of pretending to work; the front end takes screenshots itself (DM_NVN_SHOT).
+HLE_FORCE("_ZN2nn5album10InitializeEv", "相册服务：宿主没有 capsrv，初始化空操作（SDK 的版本会在 EnsureAlbumAvailable 里中止）", void, h_album_Init, void) {}
+HLE_FORCE("_ZN2nn5album8FinalizeEv", "相册服务：无", void, h_album_Fini, void) {}
+HLE_FORCE("_ZN2nn5album14SaveScreenshotEPKvmNS0_9ImageSizeENS0_16ImageOrientationENS0_17AlbumReportOptionE", "相册保存：无服务，报失败", unsigned, h_album_Save, void *data, size_t size, int isize, int orient, int opt) {
+    (void)data; (void)size; (void)isize; (void)orient; (void)opt; return RES_FAIL;
+}
+HLE_FORCE("_ZN2nn5album22SaveAndShareScreenshotEPKvmNS0_9ImageSizeENS0_16ImageOrientationENS0_17AlbumReportOptionERKNS_7account3UidEPKc", "相册保存并分享：无服务，报失败", unsigned, h_album_SaveShare,
+          void *data, size_t size, int isize, int orient, int opt, void *uid, const char *path) {
+    (void)data; (void)size; (void)isize; (void)orient; (void)opt; (void)uid; (void)path; return RES_FAIL;
+}
+HLE_FORCE("_ZN2nn5album14ShowAlbumFilesEv", "相册浏览：宿主无小程序，空操作", void, h_album_Show, void) {}
 
 // OperationMode: 0 Handheld, 1 Console; PerformanceMode: 0 Normal, 1 Boost (one-to-one with the operation mode)
 HLE_FORCE("_ZN2nn2oe16GetOperationModeEv", "运行模式查询；按 DM_OPMODE 给固定值", int, h_oe_GetOpMode, void) { int u = g_ui_opmode; if (atomic_exchange(&g_ui_armed, 0)) atomic_fetch_add(&g_ui_reads, 1); return u >= 0 ? u : opmode(); }
@@ -224,20 +238,33 @@ static void scale3d_tick(void) {
     LOG("3D 渲染比例 %.2f：3D 目标 %ux%u，输出 %ux%u（帧 %llu）", want, *(uint32_t *)(renderer + 0xee78), *(uint32_t *)(renderer + 0xee7c),
         *(uint32_t *)(renderer + 0xee88), *(uint32_t *)(renderer + 0xee8c), (unsigned long long)dm_nvn_frame_count());
 }
+// Make a caller-provided SystemEventType usable by creating it with the SDK's own CreateSystemEvent (internal layout: the type byte at +0x28 is 1 for a local
+// event and 2 for an inter-process one; InitializeMultiWaitHolder aborts on anything else). The host never signals these events, so a wait on one simply does
+// not wake; that is enough for notifications (fetched with TryPop each pass) and for "the display resolution changed" (it never does on the host).
+static void host_system_event(void *ev) {
+    if (*((uint8_t *)ev + 0x28)) return;
+    typedef unsigned (*create_t)(void *, int, unsigned);
+    create_t c = (create_t)guest_sym("_ZN2nn2os17CreateSystemEventEPNS0_15SystemEventTypeENS0_14EventClearModeEb");
+    if (!c) die("缺 SDK 符号 nn::os::CreateSystemEvent");
+    unsigned rc = c(ev, 1 /* ManualClear */, 0);
+    if (rc) die("CreateSystemEvent 失败 %#x", rc);
+}
 // The notification message event, the object RE Engine puts into a MultiWait (main+0x2c36a44 calls the getter, then InitializeMultiWaitHolder). On the device
 // oe::Initialize creates it; the host's oe::Initialize is a no-op, so the SDK global it points at stays all zero, and InitializeMultiWaitHolder aborts when the
 // type byte at +0x28 is neither 1 (local event) nor 2 (inter-process event). Build it with the SDK's own CreateSystemEvent so the internal layout is right,
-// and hand the game the same object every time. The host does not signal it (notifications are fetched with TryPop each pass); a wait on it simply does not wake.
+// and hand the game the same object every time.
 HLE_FORCE("_ZN2nn2oe27GetNotificationMessageEventEv", "系统通知事件；用 SDK 的 CreateSystemEvent 自建（宿主 oe::Initialize 是空操作）", void *, h_oe_NotifEvent, void) {
     static _Alignas(16) uint8_t ev[0x80];
-    if (!ev[0x28]) {
-        typedef unsigned (*create_t)(void *, int, unsigned);
-        create_t c = (create_t)guest_sym("_ZN2nn2os17CreateSystemEventEPNS0_15SystemEventTypeENS0_14EventClearModeEb");
-        if (!c) die("缺 SDK 符号 nn::os::CreateSystemEvent");
-        unsigned rc = c(ev, 1 /* ManualClear */, 0);
-        if (rc) die("CreateSystemEvent 失败 %#x", rc);
-    }
+    host_system_event(ev);
     return ev;
+}
+// Display resolution: the device values (the window is 1920x1080, see [nvn] WindowInitialize). Requested through am's CommonStateGetter; the host has no am,
+// and the SDK getter returns null, which RE Engine dereferences right after creating the swapchain (main+0x37fb69c → sdk+0x39b370).
+HLE_FORCE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", "默认显示分辨率；宿主报 1920x1080（与窗口一致）", void, h_oe_DefRes, int *w, int *h) {
+    if (w) *w = 1920; if (h) *h = 1080;
+}
+HLE_FORCE("_ZN2nn2oe38GetDefaultDisplayResolutionChangeEventEPNS_2os11SystemEventE", "分辨率变化事件；建一个宿主事件（永不触发）", unsigned, h_oe_ResChangeEvent, void *ev) {
+    host_system_event(ev); return 0;
 }
 HLE_FORCE("_ZN2nn2oe25TryPopNotificationMessageEPj", "系统通知队列；前端状态变化入队", unsigned, h_oe_TryPopMsg, uint32_t *msg) {
     scale3d_tick();
