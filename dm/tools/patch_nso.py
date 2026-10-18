@@ -45,8 +45,7 @@ else:
 # ---- Registered cuts: {NSO build ID: [(offset, original bytes, new bytes, reason)]} ----
 # Networking cuts (excluded scope: Battle.net / online play): taken from a community offline fix (LFS Mod Offline Fix for v2228224, which differs from the official 94012 main in only these 7 words).
 # Measured: the system service layer (nifm offline / DNS black hole / account service) cannot get around it: the game itself sends Battle.net requests directly and allows offline play according to the "last online" time.
-CUTS = {
-  # 逆转裁判123 存档/读档修复：DateTime.Now 的"时区差缓存"快路径
+# 逆转裁判123 存档/读档修复：DateTime.Now 的"时区差缓存"快路径
 #
 # main+0x960f80 = DateTime.get_Now。它把"当前时间"和缓存基准（DateTime.static+0x70）相减，
 # 差值 ≤60 秒时直接复用缓存里的 boxed TimeSpan（static+0x68），差值更大才重新调用
