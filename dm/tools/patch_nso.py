@@ -786,6 +786,7 @@ elif RULE_RUN:
     stat('private_gates_reserved')
 
 obs = list(OBS.get(BUILD_ID, []))
+if __import__('os').environ.get('PATCH_NO_OBS'): obs = []   # gate-free build for debugger breakpoints
 if RULE_RUN and PRIVATE_GATES:
     obs.append((0x43ecc8, 6, "b8686953", "private touch-run-v4 PRE-ldr; full800 host ABI"))
     obs.append((0x1237c60, 8, "d10143ff", "ui world anchor: camera world->screen entry (camera, point, out); host swaps x0 to a copy whose projection is shifted by the UI rect y (iPad UI kept 16:9 inside a taller screen), game camera untouched"))
