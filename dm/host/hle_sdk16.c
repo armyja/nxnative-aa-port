@@ -38,7 +38,19 @@ HLE_FORCE("_ZN2nn4time19ToCalendarTimeInUtcERKNS0_9PosixTimeE", "绝对秒 → U
 HLE_FORCE("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", "设备时区名 → 宿主时区", Result, h_time_LocName, char *out) {
     memset(out, 0, 0x24); tzset(); strlcpy(out, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24); return RES_OK;
 }
-HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "网络时钟（离线，不可用）", Result, h_time_NetNow, int64_t *out) { (void)out; return RES_FAIL; }
+// The network clock is the calibrated user clock on a device; the host is a single machine and offline, so it hands out the host wall clock and
+// reports full accuracy. Games that timestamp saves from the network clock (AA456) otherwise store 0 and show 01/01/1970.
+HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "网络时钟 → 宿主 time()", Result, h_time_NetNow, int64_t *out) {
+    if (out) *out = (int64_t)time(NULL);
+    if (getenv("DM_TIMELOG")) { static int n; if (n++ < 8) LOG("timelog NetNow → %lld（宿主时间）", (long long)*out); }
+    return RES_OK;
+}
+HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock3nowEv", "网络时钟 now → 宿主 time()", int64_t, h_time_NetNowNow, void) {
+    int64_t t = (int64_t)time(NULL);
+    if (getenv("DM_TIMELOG")) { static int n; if (n++ < 8) LOG("timelog NetNowNow → %lld", (long long)t); }
+    return t;
+}
+HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock20IsAccuracySufficientEv", "网络时钟精度：宿主报足够（离线也用本机时间）", int, h_time_NetAcc, void) { return 1; }
 HLE_FORCE("_ZN2nn4time8FinalizeEv", "与 Initialize 配对；宿主无会话", Result, h_time_Finalize, void) { return RES_OK; }
 // "Ensure network clock availability" async task: no request is sent; the finish event fires immediately and the result is failure. The object itself is untouched (constructor / destructor no-ops), the event lives in host static storage
 static _Alignas(16) uint8_t g_ev_netclock[0x100];

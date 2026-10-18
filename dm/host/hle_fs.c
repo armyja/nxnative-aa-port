@@ -320,6 +320,21 @@ static Result err_res(const char *op, const char *path) {
 #define RW_CREATE() if (ro) { if (!access(hp, F_OK)) return RES_PATH_EXISTS; LOG("fs 写只读挂载：%s", hp); return RES_FAIL; }
 
 // ---------- Mount ----------
+// Save data timestamps: the FS keeps a per-save "last written" PosixTime; games show it in the save slot list. The host has no such bookkeeping and
+// used to leave the query unimplemented (the game then showed 01/01/1970), so report the host wall clock and accept (ignore) writes.
+HLE_FORCE("_ZN2nn2fs20GetSaveDataTimeStampEPNS_4time9PosixTimeEm", "存档数据时间戳 → 宿主 time()", Result, h_fs_SaveTs, int64_t *out, uint64_t id) {
+    (void)id; if (out) *out = (int64_t)time(NULL);
+    if (getenv("DM_TIMELOG")) { static int n; if (n++ < 8) LOG("timelog GetSaveDataTimeStamp → %lld", out ? (long long)*out : -1); }
+    return RES_OK;
+}
+HLE_FORCE("_ZN2nn2fs20GetSaveDataTimeStampEPNS_4time9PosixTimeENS0_15SaveDataSpaceIdEm", "存档数据时间戳（带空间）→ 宿主 time()", Result, h_fs_SaveTs2, int64_t *out, int space, uint64_t id) {
+    (void)space; (void)id; if (out) *out = (int64_t)time(NULL);
+    if (getenv("DM_TIMELOG")) { static int n; if (n++ < 8) LOG("timelog GetSaveDataTimeStamp(space %d) → %lld", space, out ? (long long)*out : -1); }
+    return RES_OK;
+}
+HLE_FORCE("_ZN2nn2fs20SetSaveDataTimeStampENS0_15SaveDataSpaceIdEmRKNS_4time9PosixTimeE", "存档数据时间戳写入：宿主忽略", Result, h_fs_SetSaveTs, int space, uint64_t id, const int64_t *t) {
+    (void)space; (void)id; (void)t; return RES_OK;
+}
 HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", "fsp-srv；rom 直读宿主目录，缓存只给最小值", Result, h_fs_QueryRomCache, size_t *out) { *out = 0x1000; return RES_OK; }
 HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv；rom → 宿主 RomFS 目录", Result, h_fs_MountRom, const char *name, void *cache, size_t sz) {
     (void)cache; (void)sz; char b[1024];
