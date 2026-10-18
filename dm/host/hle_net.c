@@ -8,6 +8,16 @@ HLE_FORCE("_ZN2nn6socket10InitializeERKNS0_6ConfigE", "连 bsd 套接字服务�
 // (main+0xe1e640: signals the event the NetworkInterfaceWrapper thread parks on, then clears the flag). Without it
 // "Saving..." hangs and no file is ever written. The init flag is set by the game right after nifm::Initialize
 // returns (byte main+0x29c6c38); once it appears we publish the completion ourselves.
+static void aa_save_msg_gate(const uint64_t *regs) {
+    if (!getenv("DM_AALOG")) return;
+    // the gate stub lives in the patch area, so regs[30] is inside the stub; the real caller's return address is
+    // the first frame's [x29 + 8] (patch_nso's convention), and the x29 chain gives the callers above it
+    uint64_t fp = regs[29], chain[8] = {0}; int n = 0;
+    for (int i = 0; i < 8 && fp >= 0x1000; i++) { uint64_t nxt = *(volatile uint64_t *)fp, ret = *(volatile uint64_t *)(fp + 8); chain[n++] = ret; if (nxt <= fp) break; fp = nxt; }
+    LOG("[aa] 消息设置 id=%#llx caller=%#llx 链=%#llx,%#llx,%#llx,%#llx,%#llx", (unsigned long long)regs[1],
+        (unsigned long long)chain[0], (unsigned long long)chain[0], (unsigned long long)chain[1], (unsigned long long)chain[2], (unsigned long long)chain[3], (unsigned long long)chain[4]);
+}
+__attribute__((constructor)) static void aa_obs_gates(void) { gate_obs_set(OBS_AA_SAVE_MSG, aa_save_msg_gate); }
 void aa_net_publish_init(void) {
     static int off = -1; if (off < 0) off = getenv("DM_NET_NOHOOK") != NULL; if (off) return;
     static int done;

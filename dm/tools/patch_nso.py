@@ -162,6 +162,12 @@ CUTS = {
 # ---- Registered observation gates: {NSO build ID: [(offset, number, original instruction word, reason)]}. Numbers match OBS_* in the host's hle.h;
 # the original instruction must be position independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns ----
 OBS = {
+  # Ace Attorney 123 Trilogy (0100CB000A142000 v196608): message setter entry; the save dialog's "正在存档" text
+  # is message 0x0b in Data/StreamingAssets/menu/text/save_text_s.bin -- logging the callers tells us which C#
+  # path starts a save (the save never reaches fs on the host, so we need the caller, not the file system)
+  'c5b5d28842207c47bd0fc97137e5e75f': [
+    (0x13b430, 21, 'f81c0ff7', 'AA：消息设置入口（存档对话框文本观察）'),
+  ],
   # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
   # On hardware the dispatcher thread (priority 30, core 0 only) preempts the main thread (priority 44, core 0) at once and finishes first; the host waits for the ring to empty after each post (hle_movie.c movie_ring_wait). The gates sit on the add x22, x22, #8 after the bl
   '646761f643afebb379edd5e6a5151af2': [
