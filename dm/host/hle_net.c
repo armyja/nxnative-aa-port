@@ -34,8 +34,9 @@ static void aa_gate_ondece(const uint64_t *r) { LOG("[aa] OnDecide"); aa_save_ga
 static void aa_gate_msgset(const uint64_t *r) { LOG("[aa] Mess_window_set"); aa_save_gate(r); }
 // Text.set_text(this, value): the value is an Il2CppString (length at +0x10, UTF-16 chars at +0x14). Only log strings
 // that contain 存档 / 保存 / 电源 -- the save dialog's text -- so the log stays small.
-static void aa_gate_save_game2(const uint64_t *r) { LOG("[aa] SaveGameData(真)"); aa_save_gate(r); }
-static void aa_gate_tempdata(const uint64_t *r) { LOG("[aa] tempDataGet"); aa_save_gate(r); }
+static void aa_gate_save_game2(const uint64_t *r) { LOG("[aa] SaveGameData"); aa_save_gate(r); }
+static void aa_gate_tempdata(const uint64_t *r) { LOG("[aa] tempDataSet"); aa_save_gate(r); }
+static void aa_gate_issave(const uint64_t *r) { LOG("[aa] get_is_save_"); aa_save_gate(r); }
 static void aa_gate_settext(const uint64_t *r) {
     if (!getenv("DM_AALOG")) return;
     const volatile uint8_t *sp = (const volatile uint8_t *)(uintptr_t)r[1];
@@ -72,6 +73,7 @@ __attribute__((constructor)) static void aa_obs_gates(void) {
     gate_obs_set(OBS_AA_SETTEXT, aa_gate_settext);
     gate_obs_set(OBS_AA_SAVE_GAME2, aa_gate_save_game2);
     gate_obs_set(OBS_AA_TEMPDATA, aa_gate_tempdata);
+    gate_obs_set(OBS_AA_ISSAVE, aa_gate_issave);
 }
 void aa_net_publish_init(void) {
     static int off = -1; if (off < 0) off = getenv("DM_NET_NOHOOK") != NULL; if (off) return;

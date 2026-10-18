@@ -176,8 +176,9 @@ OBS = {
     (0x3c2090, 26, 'aa0003e8', 'AA：OnDecide 入口（UI 确认回调，可能是存档确认）'),
     (0x144d40, 27, 'a9bd57f6', 'AA：Mess_window_set 入口'),
     (0x4d4850, 28, 'f9401000', 'AA：UI Text.set_text 入口（过滤含"存档"的文本，反查存档对话框的调用者）'),
-    (0x336310, 29, 'd10183ff', 'AA：SaveGameData 实际入口（运行时符号表偏差一位，补上）'),
-    (0x335eb0, 30, 'd10183ff', 'AA：tempDataGet 入口（SaveGameDataRequest 会调）'),
+    (0x3366e0, 29, 'f81e0ff3', 'AA：SaveControl.SaveGameData 入口（类方法表对齐后的准确地址）'),
+    (0x3351e0, 30, 'f81c0ff7', 'AA：SaveControl.tempDataSet 入口'),
+    (0x334b60, 31, 'a9be4ff4', 'AA：SaveControl.get_is_save_ 入口'),
   ],
   # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
   # On hardware the dispatcher thread (priority 30, core 0 only) preempts the main thread (priority 44, core 0) at once and finishes first; the host waits for the ring to empty after each post (hle_movie.c movie_ring_wait). The gates sit on the add x22, x22, #8 after the bl
