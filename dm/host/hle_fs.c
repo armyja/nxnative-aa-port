@@ -834,7 +834,19 @@ HLE_FORCE("_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE", "fsp-srv
     closedir(d); *out = n; return RES_OK;
 }
 // Whether save data exists: the host's save directory is created at mount time, so from the game's point of view it always exists (EnsureSaveData always succeeds too)
-HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingERKNS_7account3UidE", "fsp-srv；存档恒已建（返回 bool）", unsigned, h_fs_SaveExists, const void *uid) { (void)uid; return 1; }
+HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingERKNS_7account3UidE", "fsp-srv；按存档目录里有没有文件如实回答", unsigned, h_fs_SaveExists, const void *uid) {
+    (void)uid;
+    // Report whether the save actually holds anything: claiming "exists" on an empty directory made the game take the
+    // "read the existing save" path on first boot (dimmed screen, no fs access, A ignored). Games that create their
+    // save only when this says "none" then get the create path.
+    const char *d = getenv("DM_SAVE"); if (!d) return 0;
+    DIR *dp = opendir(d); if (!dp) return 0;
+    int any = 0; struct dirent *e;
+    while ((e = readdir(dp))) { if (e->d_name[0] == '.') continue; any = 1; break; }
+    closedir(dp);
+    if (g_flag.fs) LOG("fs 存档是否存在 → %d（%s）", any, d);
+    return any;
+}
 // File system access log and thread priority: on the real device both ask fsp-srv (the access log switch lives in the service); the host has no access log and priority does not affect pread
 HLE_FORCE("_ZN2nn2fs26SetPriorityOnCurrentThreadENS0_8PriorityE", "fsp-srv；文件读优先级，宿主忽略", void, h_fs_SetPrio, int prio) { (void)prio; }
 HLE_FORCE("_ZN2nn2fs6detail18IsEnabledAccessLogEj", "fsp-srv；访问日志恒关（返回 bool）", unsigned, h_fs_AccessLogMask, unsigned mask) { (void)mask; return 0; }
