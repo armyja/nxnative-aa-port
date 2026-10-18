@@ -379,6 +379,9 @@ static void map_image(module_t *m, const char *dir) {
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - fl); free(raw); install_key_page(m);
         uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
+        // DM_TEXT_WRITABLE=1: leave the text segment RWX so a debugger (lldb) can set software breakpoints on
+        // guest C# methods; debugging aid only, never on for real runs
+        if (getenv("DM_TEXT_WRITABLE")) mprotect(m->base, rx, PROT_READ | PROT_WRITE | PROT_EXEC);
         if (mprotect(a, m->patch_len, PROT_READ | PROT_EXEC)) die("%s mprotect patch", m->name);
         if (pre > m->patch_len && mprotect(a + m->patch_len, pre - m->patch_len, PROT_NONE)) die("%s mprotect gap", m->name);
         return;
