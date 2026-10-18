@@ -118,6 +118,7 @@ static int aa_is_save_flag(module_t *m) {
     if (!sf) return -1;
     return *(volatile uint8_t *)(uintptr_t)(sf + 6);
 }
+static volatile uint64_t g_aa_coro_iter;   // last <CoroutineSave> iterator seen (state polling below)
 static void aa_gate_corosave_next(const uint64_t *r) {
     if (!getenv("DM_AALOG")) return;
     extern uint64_t dm_guest_frame(void);
@@ -125,6 +126,7 @@ static void aa_gate_corosave_next(const uint64_t *r) {
     LOG("[aa] CoroutineSave.MoveNext 帧%llu this=%#llx win=%#llx state=%d is_save=%d", (unsigned long long)dm_guest_frame(),
         (unsigned long long)r[0], (unsigned long long)*(volatile uint64_t *)(uintptr_t)(r[0] + 0x18),
         (int)*(volatile int32_t *)(uintptr_t)(r[0] + 0x2c), aa_is_save_flag(m));
+    g_aa_coro_iter = r[0];
     aa_save_gate(r);
 }
 static void aa_gate_coroanim_next(const uint64_t *r) {
@@ -147,6 +149,7 @@ static void aa_gate_startcoro(const uint64_t *r) {
     if (!strstr(nm, "Save") && !strstr(nm, "save")) return;
     extern uint64_t dm_guest_frame(void);
     LOG("[aa] StartCoroutine 帧%llu owner=%#llx %s", (unsigned long long)dm_guest_frame(), (unsigned long long)r[0], nm);
+    if (strstr(nm, "<CoroutineSave>")) g_aa_coro_iter = it;   // poll this iterator's state machine each frame
 }
 static void aa_gate_settext(const uint64_t *r) {
     if (!getenv("DM_AALOG")) return;
@@ -218,6 +221,13 @@ HLE_FORCE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", "离线：请求不在等待�
 // Probe: call the game's own C# save request from the host at a given frame (bypassing the stuck save menu), to tell
 // "the menu never calls it" apart from "the save code itself is broken". DM_AA_CALL_SAVE=<frame>:<slot>
 void aa_call_save_probe(void) {
+    // Poll the save coroutine's state machine: if Unity ever calls MoveNext again the state changes; if it stays 1
+    // forever, Unity really dropped the coroutine (that is the current situation)
+    if (g_aa_coro_iter) {
+        static int last = -99; extern uint64_t dm_guest_frame(void);
+        int st = *(volatile int32_t *)(uintptr_t)(g_aa_coro_iter + 0x2c);
+        if (st != last) { LOG("[aa] 存档协程状态 %d → %d（帧%llu）", last, st, (unsigned long long)dm_guest_frame()); last = st; }
+    }
     if (g_aa_release_b_at) {
         extern void dm_script_set(uint64_t, int32_t, int32_t, int32_t, int32_t);
         extern uint64_t dm_guest_frame(void);

@@ -188,7 +188,6 @@ OBS = {
     (0x333be0, 37, 'a9be4ff4', 'AA：SaveConfirmationWindow.LoadingWait 入口'),
     (0x338280, 38, 'a9be4ff4', 'AA：SaveLoadUICtrl.CoroutineSaveLoad 入口'),
     (0x8ee940, 39, 'f81d0ff5', 'AA：MonoBehaviour.StartCoroutine 入口（记录存档相关协程的启动）'),
-    (0x334400, 40, 'd101c3ff', 'AA：<CoroutineSave>c__Iterator4.MoveNext（存档协程体）'),
     (0x334cb0, 41, 'f81d0ff5', 'AA：<CoroutineSaveAnim>c__Iterator3.MoveNext（存档动画协程体）'),
     (0x8e5610, 42, 'f81d0ff5', 'AA：GameObject.SetActive 入口（观察存档窗口是否被停用）'),
     (0x8eea20, 43, 'f81d0ff5', 'AA：MonoBehaviour.StopCoroutine 入口'),
