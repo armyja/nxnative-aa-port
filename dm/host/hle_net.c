@@ -1,6 +1,7 @@
 // Networking (out of scope: online play/friends/store/cloud saves): all hooked up as "network unavailable", the game takes the offline branch.
 // Cuts: nifm reports no network; socket only hooks up Initialize (returns success, creates no session), the rest of socket/ssl/friends are hooked up as failures when they come into use.
 #include "hle.h"
+#include <time.h>
 #include <sys/mman.h>
 
 HLE_FORCE("_ZN2nn6socket10InitializeERKNS0_6ConfigE", "连 bsd 套接字服务；离线，不建会话（剪）", Result, h_socket_Initialize, const void *cfg) { (void)cfg; return RES_OK; }
@@ -112,8 +113,12 @@ static void aa_gate_nowinject(const uint64_t *r) {
     uint64_t *regs = (uint64_t *)(uintptr_t)r;
     time_t now = time(NULL);
     if (now <= 0) return;
-    regs[0] = (uint64_t)((int64_t)now + 62135596800LL) * 10000000ULL;   // DateTime ticks (100ns since 0001-01-01)
-    regs[1] = 0;                                                        // kind = Unspecified
+    struct tm lt;
+    int64_t off = 0;
+    if (localtime_r(&now, &lt)) off = (int64_t)lt.tm_gmtoff;   // seconds east of UTC (this machine: +8h)
+    int64_t local = (int64_t)now + off;                        // wall-clock seconds, written as an Unspecified DateTime
+    regs[0] = (uint64_t)(local + 62135596800LL) * 10000000ULL;   // DateTime ticks (100ns since 0001-01-01)
+    regs[1] = 0;                                                // kind = Unspecified
 }
 static void aa_gate_nowval(const uint64_t *r) {
     if (!getenv("DM_AALOG")) return;
