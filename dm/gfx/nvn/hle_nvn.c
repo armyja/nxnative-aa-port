@@ -270,7 +270,7 @@ NVN(nvnTextureCompare, NVNboolean, const NVNtexture *a, const NVNtexture *b) {
 // No prototype in the header; call sites such as main 0x174899c compare the return value with 1 and set some status bit 0x100 if not equal. Meaning unverified; return 1 for now
 NVN_NOPROTO(nvnTextureGetRawStorageClass, int, const NVNtexture *t) { (void)t; return 1; }
 #define VW(v) ((view_t *)(v))
-NVN(nvnTextureViewSetDefaults, void, NVNtextureView *v) { memset(v, 0, sizeof(view_t)); }
+NVN(nvnTextureViewSetDefaults, void, NVNtextureView *v) { memset(v, 0, sizeof(view_t)); OLOG("TextureView %p", (void *)v); }
 NVN(nvnTextureViewSetLevels, void, NVNtextureView *v, int base, int n) { VW(v)->set_levels = 1; VW(v)->base_level = base; VW(v)->nlevels = n; }
 NVN(nvnTextureViewSetLayers, void, NVNtextureView *v, int min, int n) { VW(v)->set_layers = 1; VW(v)->min_layer = min; VW(v)->nlayers = n; }
 NVN(nvnTextureViewSetFormat, void, NVNtextureView *v, NVNformat f) { VW(v)->set_format = 1; VW(v)->format = f; }
@@ -540,15 +540,20 @@ NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemory
     cmd_new_segment(CB(c), pl->mem + off, n);
 }
 NVN(nvnCommandBufferAddControlMemory, void, NVNcommandBuffer *c, void *m, size_t n) { (void)c; (void)m; (void)n; }
+// DM_NVN_CBDEFER=1: replace the DM_NVN_NO_CB bypass. The game's out-of-memory callback only frees command-memory chunks at a frame boundary, so calling
+// it in the middle of a recording deadlocks (the frame cannot finish, the chunks never come back; 逆转裁判123 froze inside its own callback on the first
+// Start press). With deferral the host lends a segment immediately and the callback runs once at the next submit.
+static cmd_t *g_cb_pending; static uint32_t g_cb_pending_size;   // callback to run at the next submit
 // Get space for one record; if not enough, call back into the game per the NVN convention to add command memory
 static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
     size = (size + 7) & ~7u;
     for (int tries = 0; !o->cur || o->cur + size + OP_RESERVE > o->end; tries++) {
         // The game's callback cannot supply enough (newer-SDK games hand out small chunks sized for real-device commands, or disable the callback and manage memory themselves): continue recording in a host segment instead of aborting
-        // DM_NVN_NO_CB=1: never call back into the game for command memory (base 逆转裁判123 freezes inside that
-        // guest callback on the first Start press); the host lends a segment instead
-        static int nocb = -1; if (nocb < 0) nocb = getenv("DM_NVN_NO_CB") != NULL;
-        if (!o->cb || nocb || tries == 2) {
+        // DM_NVN_NO_CB=1: never call back into the game for command memory at all; the host lends a segment instead
+        static int nocb = -1, defer = -1;
+        if (nocb < 0) { nocb = getenv("DM_NVN_NO_CB") != NULL; defer = getenv("DM_NVN_CBDEFER") != NULL; }
+        if (defer && o->cb && !nocb && !g_cb_pending) { g_cb_pending = o; g_cb_pending_size = size + OP_RESERVE; }
+        if (!o->cb || nocb || defer || tries == 2) {
             static int once; if (!once++) LOG("[nvn] 命令内存：游戏回调补不够（cb=%p，需 %u 字节），改用宿主补段", (void *)o->cb, size + OP_RESERVE);
             cmd_new_segment(o, hostseg_take(o), HOSTSEG_SZ); break;
         }
@@ -857,6 +862,11 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
     atomic_fetch_add(&g_sub_cpu_ns, dc); atomic_fetch_add(&g_cum_sub_cpu_ns, dc);
     atomic_fetch_add(&g_sub_instr, di); atomic_fetch_add(&g_cum_sub_instr, di);
     gfx_leave();
+    {   // DM_NVN_CBDEFER=1: run the game's out-of-memory callback here, at the frame boundary (see cmd_alloc)
+        cmd_t *o = g_cb_pending; if (o) { uint32_t sz = g_cb_pending_size; g_cb_pending = NULL;
+            static int once; if (!once++) LOG("[nvn] 帧末回调游戏补内存（需 %u 字节）：游戏的内存块只在帧边界回收，录制中间回调会死锁", sz);
+            o->cb((NVNcommandBuffer *)o, NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY, sz, o->cb_data); }
+    }
 }
 
 // Commands that only affect GPU state / only execute on the GPU: the null device only counts them (the thunk has already counted)
@@ -1174,7 +1184,9 @@ static uint64_t present_period(const win_t *o) {
     return hz > 0 ? (uint64_t)itv * 1000000000ull / (uint64_t)hz : 0;
 }
 int (*g_nvn_loadscreen_up)(void);   // host registration: whether the loading screen is up right now (filled in when diag.c subscribes to UI messages; null in graphics unit tests = no gate)
+extern void aa_net_publish_init(void) __attribute__((weak));
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
+    if (aa_net_publish_init) aa_net_publish_init();   // 逆转裁判123：每帧一次机会，补发网络平台初始化完成（见 hle_net.c）
     (void)q; win_t *o = (win_t *)w; o->presents++;
     static uint64_t prev_in, prev_out, prev_pass, prev_draw;
     // Loading screen on first entering a run: if the background pipeline warm-up has not finished, wait for it here (the loading screen stays a bit longer), so that after entering the run no pipelines are compiled on the fly on the submit thread. When warm-up finished long ago this passes with a single check

@@ -392,9 +392,23 @@ static void thr_bt(thr_t *t) {
     if (thread_get_state(t->mport, ARM_THREAD_STATE64, (thread_state_t)&st, &n) == KERN_SUCCESS) {
         // Threads not waiting in a system call (running guest code, possibly spinning on a condition): print the callee-saved registers x19–x28, plus 128 bytes of the memory pointed to by each of x19 / x20.
         // The state seen in the occasional "no frames after entering a run": the main thread spins in the job pool's "help while waiting" (main+0x14f08d8), x19 = wait object, x20 = job pool -- only with these can one tell which batch it is waiting for and what the unfinished count is
-        if (t->wkind == 0) { char rl[400]; int q = snprintf(rl, sizeof rl, "[dm]   %#x 寄存器 pc=", t->handle); uint64_t pc = __darwin_arm_thread_state64_get_pc(st); module_t *pm = module_of((void *)pc);
+        { // also for threads blocked in a host wait: x19-x28 are callee-saved, the HLE path preserves them, so they still hold the guest's values (the object a virtual call was made on)
+          char rl[600]; int q = snprintf(rl, sizeof rl, "[dm]   %#x 寄存器 pc=", t->handle); uint64_t pc = __darwin_arm_thread_state64_get_pc(st); module_t *pm = module_of((void *)pc);
             q += pm ? snprintf(rl + q, sizeof rl - q, "%s+%#llx", pm->name, pc - (uint64_t)pm->base) : snprintf(rl + q, sizeof rl - q, "%#llx", pc);
             for (int i = 19; i <= 28; i++) q += snprintf(rl + q, sizeof rl - q, " x%d=%#llx", i, st.__x[i]);
+            q += snprintf(rl + q, sizeof rl - q, " fp=%#llx sp=%#llx lr=%#llx", st.__fp, st.__sp, st.__lr);
+            // guest registers saved by the gate frame at this SVC: the objects a virtual call was made on (x19/x20) and the guest fp for walking its stack
+            { uint64_t *r = t->svc_regs; if (r) {
+                module_t *lm = module_of((void *)r[30]);
+                q += snprintf(rl + q, sizeof rl - q, "｜客体 x0=%#llx x1=%#llx x2=%#llx x8=%#llx x19=%#llx x20=%#llx x29=%#llx lr=%s+%#llx",
+                              r[0], r[1], r[2], r[8], r[19], r[20], r[29], lm ? lm->name : "?", lm ? r[30] - (uint64_t)lm->base : r[30]);
+                uint64_t fp = r[29];
+                for (int d = 0; d < 8 && fp; d++) { uint64_t pair[2]; vm_size_t got = 0;
+                    if (vm_read_overwrite(mach_task_self(), fp, sizeof pair, (vm_address_t)pair, &got) || got != sizeof pair) break;
+                    module_t *cm = module_of((void *)pair[1]);
+                    q += snprintf(rl + q, sizeof rl - q, " ← %s+%#llx", cm ? cm->name : "?", cm ? pair[1] - (uint64_t)cm->base : pair[1]);
+                    if (pair[0] <= fp) break; fp = pair[0];
+                } } }
             fprintf(stderr, "%s\n", rl);
             for (int i = 19; i <= 20; i++) { uint8_t raw[128]; vm_size_t g = 0; uint64_t a = st.__x[i];
                 if (a < 0x100000000ull || vm_read_overwrite(mach_task_self(), a, sizeof raw, (vm_address_t)raw, &g) || g != sizeof raw) continue;
@@ -520,6 +534,10 @@ static void sleep_precise(uint64_t dl) {
         struct timespec ts = {(time_t)(s / 1000000000u), (long)(s % 1000000000u)}; nanosleep(&ts, 0);
     }
 }
+// DM_CVLOG=<frame>: from that presented frame on, log process-wide key waits / signals (svc 0x1C / 0x1D) -- for the
+// "a global event is never signalled" class of hang (the wait and the signal both show the key address, so they can be paired offline)
+static int cvlog_min(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_CVLOG"); v = e ? atoi(e) : -1; } return v; }
+uint64_t dm_guest_frame(void);   // hle.h (hle_thread.c only includes dm.h)
 int svc_thread(int num, uint64_t *regs) {
     int r = svc_thread_impl(num, regs);
     thr_t *me = pthread_getspecific(g_keythr);
@@ -633,6 +651,11 @@ static int svc_thread_impl(int num, uint64_t *regs) {
     case 0x1B: pthread_mutex_lock(&G); lock_handoff(regs[0]); pthread_mutex_unlock(&G); regs[0] = 0; return 1;
     case 0x1C: {  // WaitProcessWideKeyAtomic(x0 lock address, x1 condition key, w2 tag, x3 timeout)
         thr_t *t = cur(); uint64_t addr = regs[0], key = regs[1];
+        {   // DM_CVLOG=<frame>: from that presented frame on, log process-wide key waits / signals (the "a global event is never signalled" class of hang)
+            int m = cvlog_min();
+            if (m >= 0 && dm_guest_frame() >= (uint64_t)m) { module_t *mk = module_of((void *)key), *ma = module_of((void *)addr);
+                LOG("[cv] 等 锁 %#llx%s 键 %#llx%s 标签 %#x 线程 %#x 超时 %lld lr=%#llx", addr, ma ? ma->name : "", key, mk ? mk->name : "", (uint32_t)regs[2], t ? t->handle : 0, (int64_t)regs[3], t ? t->last_lr : 0); }
+        }
         pthread_mutex_lock(&G);
         // The order matters: first set the condition key = 1, then release the mutex. The SDK's InternalConditionVariable::Signal first reads the condition key in user mode, and does not issue svc 0x1D if it is 0;
         // grabbing the mutex in user mode does not go through G either. It used to do lock_handoff first and set the key after: after the release and before the key was set, another thread could grab the lock in user mode, change the condition, read key 0 and not wake anyone,
@@ -663,6 +686,11 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         int left = 0; for (thr_t *w = g_wait; w; w = w->next) if (w->wkind == 2 && w->wkey == key) { left = 1; break; }
         if (!left) st32(key, 0);
         pthread_mutex_unlock(&G);
+        {   // DM_CVLOG=<frame>: same as the wait side
+            int m = cvlog_min();
+            if (m >= 0 && dm_guest_frame() >= (uint64_t)m) { module_t *mk = module_of((void *)key);
+                LOG("[cv] 信 键 %#llx%s 计数 %d 唤醒 %d 剩 %d 线程 %#x lr=%#llx", key, mk ? mk->name : "", cnt, n, left, cur() ? cur()->handle : 0, cur() ? cur()->last_lr : 0); }
+        }
         regs[0] = 0; return 1;
     }
 
@@ -702,6 +730,10 @@ static int svc_thread_impl(int num, uint64_t *regs) {
     case 0x45: {  // CreateEvent(→w1 write end, w2 read end)
         event_t *e = calloc(1, sizeof *e); e->refs = 2;
         pthread_mutex_lock(&G); uint32_t hw = h_new(O_EVENT_W, e), hr = h_new(O_EVENT_R, e); pthread_mutex_unlock(&G);
+        {   // DM_CVLOG=<frame>: kernel events (CreateEvent / SignalEvent / ClearEvent / ResetSignal) and single-object event waits, so an event that is waited on but never signalled can be found offline
+            int m = cvlog_min();
+            if (m >= 0 && dm_guest_frame() >= (uint64_t)m) LOG("[ev] 建 写 %#x 读 %#x 对象 %p lr=%#llx", hw, hr, (void *)e, cur() ? cur()->last_lr : 0);
+        }
         regs[0] = 0; regs[1] = hw; regs[2] = hr; return 1;
     }
     case 0x11: case 0x12: case 0x17: {  // SignalEvent(write end) / ClearEvent(either end) / ResetSignal(read end, error if not signaled)
@@ -717,10 +749,22 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         else if (num == 0x17 && !e->signaled) r = R_BAD_STATE;
         else e->signaled = 0;
         pthread_mutex_unlock(&G);
+        {   // DM_CVLOG: event signal / clear / reset (see the CreateEvent log above)
+            int m = cvlog_min();
+            if (m >= 0 && dm_guest_frame() >= (uint64_t)m) LOG("[ev] %s 句柄 %#x 对象 %p 已置位 %d lr=%#llx",
+                num == 0x11 ? "信" : num == 0x17 ? "复位" : "清", h, (void *)e, e ? e->signaled : -1, cur() ? cur()->last_lr : 0);
+        }
         regs[0] = (uint64_t)r; return 1;
     }
     case 0x18: {  // WaitSynchronization(→w1 index; x1 handle array, w2 count, x3 timeout)
         thr_t *t = cur(); const uint32_t *hs = (const uint32_t *)regs[1]; int n = (int)regs[2]; int64_t ns = (int64_t)regs[3];
+        {   // DM_CVLOG=<frame>: single-object event waits (see the CreateEvent log), to pair with the signal / clear lines
+            int m = cvlog_min();
+            if (m >= 0 && n == 1 && dm_guest_frame() >= (uint64_t)m) {
+                event_t *e = h_peek(hs[0], O_EVENT_R) ? h_peek(hs[0], O_EVENT_R) : h_peek(hs[0], O_EVENT_W);
+                if (e) LOG("[ev] 等 句柄 %#x 对象 %p 已置位 %d 超时 %lld lr=%#llx", hs[0], (void *)e, e->signaled, ns, t ? t->last_lr : 0);
+            }
+        }
         int64_t deadline = ns > 0 ? (dm_detclock_enabled() ? (int64_t)guest_ns() : now_mono_ns()) + ns : 0;
         pthread_mutex_lock(&G);
         int64_t r; int idx = -1;

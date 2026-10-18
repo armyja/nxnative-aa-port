@@ -182,6 +182,16 @@ void crash_thread_init(void) {
     stack_t ss = {.ss_sp = malloc(65536), .ss_size = 65536}; sigaltstack(&ss, 0);
     pthread_setspecific(g_altstack_key, ss.ss_sp);
 }
+// Manual dump trigger for interactive sessions: kill -INFO <pid> (or Ctrl-T in a terminal) dumps every guest
+// thread where it waits, without killing the game. The signal handler only sets a flag; the dumping thread is a
+// normal one (crash_dump_now takes the log lock, which the interrupted thread might hold).
+static volatile sig_atomic_t g_dump_req;
+static void on_info(int sig) { (void)sig; g_dump_req = 1; }
+static void *dump_req_main(void *arg) {
+    (void)arg;
+    for (;;) { usleep(100000); if (g_dump_req) { g_dump_req = 0; crash_dump_now("手动触发（SIGINFO）"); } }
+    return NULL;
+}
 void crash_install(void) {
     crash_thread_init();
     struct sigaction sa = {.sa_sigaction = on_crash, .sa_flags = SA_SIGINFO | SA_ONSTACK};
@@ -197,4 +207,7 @@ void crash_install(void) {
         pthread_detach(th);
     }
     sigaction(SIGSEGV, &sa, 0); sigaction(SIGBUS, &sa, 0); sigaction(SIGILL, &sa, 0); sigaction(SIGTRAP, &sa, 0);
+    { struct sigaction si = {.sa_sigaction = (void (*)(int, siginfo_t *, void *))on_info, .sa_flags = SA_ONSTACK};
+      sigaction(SIGINFO, &si, 0);
+      pthread_t th; if (!pthread_create(&th, NULL, dump_req_main, NULL)) pthread_detach(th); }
 }

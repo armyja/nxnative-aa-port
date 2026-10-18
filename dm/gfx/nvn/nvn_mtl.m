@@ -6261,23 +6261,21 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         if (c) { shot_path = c + 1; for (const char *q = e; q < c && nshot < 4096; q = strchr(q, ',') ? strchr(q, ',') + 1 : c) shots[nshot++] = atol(q); }
     }
     for (int i = 0; i < nshot; i++) if ((long)g_present_n == shots[i]) { char path[1024]; snprintf(path, sizeof path, shot_path, (int)g_present_n); mtl_finish_gpu(); shot(src, path, 1, crop); }
-    {   // DM_SHOT=<frame>:<path>: one screenshot at that present frame (local debugging aid)
-        static int inited, taken; static uint64_t want; static char spath[1024];
-        static int nshot_s; static const char *shotlist; static const char *shotp;
-        if (!inited) { inited = 1; shotlist = getenv("DM_SHOT"); }
-        while (shotlist && *shotlist) {   // DM_SHOT=frame:path[,frame:path...]: several screenshots in one run
-            if (!shotp) {
-                const char *c = strchr(shotlist, ':');
-                if (!c) { shotlist = NULL; break; }
-                want = strtoull(shotlist, NULL, 10);
-                size_t n = 0; const char *q = c + 1; while (q[n] && q[n] != ',') n++;
-                if (n >= sizeof spath) n = sizeof spath - 1;
-                memcpy(spath, q, n); spath[n] = 0; shotp = q + n; shotlist = (*shotp == ',') ? shotp + 1 : shotp;
-            }
-            if (g_present_n < want) break;
-            mtl_finish_gpu(); shot(src, spath, 1, crop); MLOG("【截图】%s 帧 %llu", spath, (unsigned long long)g_present_n);
-            nshot_s++; shotp = NULL;
-        }
+    {   // DM_SHOT=<frame>:<path>[,<frame>:<path>...]: one screenshot at each present frame (local debugging aid); >= so a dropped present does not lose the shot
+        static int inited; static int nsshots; static struct { uint64_t frame; char path[1024]; } sshots[16];
+        if (!inited) { inited = 1; const char *e = getenv("DM_SHOT");
+            for (const char *q = e; q && *q && nsshots < 16;) {
+                char *end; uint64_t f = strtoull(q, &end, 10);
+                if (end == q || *end != ':') { MLOG("【红】DM_SHOT 参数无效：%s", q); break; }
+                q = end + 1; size_t n = 0; while (q[n] && q[n] != ',') n++;
+                if (n >= sizeof sshots[0].path) n = sizeof sshots[0].path - 1;
+                memcpy(sshots[nsshots].path, q, n); sshots[nsshots].path[n] = 0; sshots[nsshots].frame = f; nsshots++;
+                q += n + (q[n] == ',' ? 1 : 0);
+            } }
+        for (int i = 0; i < nsshots; i++) if (sshots[i].frame && g_present_n >= sshots[i].frame) {
+            uint64_t f = sshots[i].frame; sshots[i].frame = 0;   // disarm before the shot so the two present paths cannot take it twice
+            mtl_finish_gpu(); shot(src, sshots[i].path, 1, crop); MLOG("【截图】%s 帧 %llu", sshots[i].path, (unsigned long long)g_present_n);
+            (void)f; }
         static int rinited, rtaken; static uint64_t rwant; static char rpath[1024];
         if (!rinited) { rinited = 1; const char *e = getenv("DM_SHOT_RAW"); if (e) { const char *c = strchr(e, ':'); if (c) { rwant = strtoull(e, NULL, 10); strlcpy(rpath, c + 1, sizeof rpath); } } }
         if (rpath[0] && !rtaken && g_present_n >= rwant) { rtaken = 1; shot(src, rpath, 0, crop); MLOG("【截图-原始】%s 帧 %llu %zux%zu", rpath, (unsigned long long)g_present_n, src.width, src.height); }

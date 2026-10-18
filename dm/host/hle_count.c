@@ -13,7 +13,18 @@
 static struct { const char *kind, *name; void *fn; _Atomic uint64_t n; } g_hc[HC_MAX];
 static unsigned g_nhc; static uint32_t *g_hcode; static int g_hon = -1, g_hsealed; static const char *g_hpath;
 static _Atomic uint64_t g_hsvc[256];
-static int hc_on(void) { if (g_hon < 0) { g_hpath = getenv("DM_HLECOUNT"); g_hon = g_hpath != NULL; } return g_hon; }
+static int hc_on(void) { if (g_hon < 0) { g_hpath = getenv("DM_HLECOUNT"); g_hon = g_hpath != NULL || getenv("DM_HLELOG") != NULL; } return g_hon; }
+// DM_HLELOG: instead of counting, every wrapped entry stores its index into g_last_hle; a reader thread prints the
+// sequence with presented-frame numbers -- for "which service was the last one before the game spun forever".
+uint64_t dm_guest_frame(void);   // hle_thread.c / hle.h
+static _Atomic unsigned g_last_hle; static const char **g_hnames; static unsigned g_nhnames;
+static int hlelog_on(void) { static int v = -1; if (v < 0) v = getenv("DM_HLELOG") != NULL; return v; }
+static void *hlelog_main(void *arg) {
+    (void)arg; unsigned last = ~0u;
+    for (;;) { usleep(2000); unsigned v = atomic_load(&g_last_hle); if (v != last) { last = v;
+        if (v && g_hnames && v < g_nhnames) LOG("[hle] 帧 %llu %s", (unsigned long long)dm_guest_frame(), g_hnames[v]); } }
+    return NULL;
+}
 static void hc_write(void) {
     char pth[1024]; snprintf(pth, sizeof pth, g_hpath, (int)getpid());   // %d in the path is replaced with the process id (parallel runs each write their own copy)
     FILE *f = fopen(pth, "w"); if (!f) { LOG("【红】DM_HLECOUNT 写不了 %s", pth); return; }
@@ -29,6 +40,23 @@ void *hlecount_wrap(const char *kind, const char *name, void *fn) {
     if (g_nhc == HC_MAX) die("DM_HLECOUNT 入口超过 %d", HC_MAX);
     if (!g_hcode) { g_hcode = mmap(NULL, HC_MAX * 48, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0); if (g_hcode == MAP_FAILED) die("DM_HLECOUNT mmap"); atexit(hc_write); }
     unsigned i = g_nhc++; g_hc[i].kind = kind; g_hc[i].name = name; g_hc[i].fn = fn;
+    if (hlelog_on()) {   // log stub: record the index, then branch (no per-entry counter)
+        // noisy per-frame services (audio thread, allocator, input polling, vsync, notifications): not interesting
+        static const char *const quiet[] = {"_ZN2nn5audio", "_ZN2nn3mem", NULL};
+        for (int q = 0; quiet[q]; q++) if (!strncmp(name, quiet[q], strlen(quiet[q]))) return fn;
+        if (!g_hnames) { g_hnames = calloc(HC_MAX, sizeof *g_hnames); }
+        g_hnames[i] = name; if (i + 1 > g_nhnames) g_nhnames = i + 1;
+        uint32_t *w = g_hcode + 12 * i;
+        w[0] = 0x58000000 | ((0x18 / 4) << 5) | 16;                  // ldr x16, [pc+0x18] -> &g_last_hle
+        w[1] = 0xD2800000 | ((i & 0xffffu) << 5) | 17;               // movz x17, #i
+        w[2] = 0xB9000000 | (16u << 5) | 17;                         // str w17, [x16]
+        w[3] = 0x58000000 | ((0x14 / 4) << 5) | 16;                  // ldr x16, [pc+0x14] -> implementation
+        w[4] = 0xD61F0200;                                           // br x16
+        w[5] = 0xD503201F;
+        uint64_t a = (uint64_t)&g_last_hle, b = (uint64_t)fn; memcpy(w + 6, &a, 8); memcpy(w + 8, &b, 8);
+        static pthread_t th; static int started; if (!started && (started = 1)) pthread_create(&th, NULL, hlelog_main, NULL);
+        return w;
+    }
     uint32_t *w = g_hcode + 12 * i;                                  // 48 bytes: 5 instructions + 1 empty + two 8-byte literals (offsets 0x18 / 0x20)
     w[0] = 0x58000000 | ((0x18 / 4) << 5) | 16;                      // ldr x16, [pc+0x18]   → &count
     w[1] = 0xD2800031;                                                // movz x17, #1

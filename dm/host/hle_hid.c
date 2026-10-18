@@ -19,8 +19,8 @@ enum { STICK_THRESH = 0x4000 };
 typedef struct { int64_t sampling; uint64_t buttons; int32_t lx, ly, rx, ry; uint32_t attributes, _pad; } NpadState;
 _Static_assert(sizeof(NpadState) == 0x28, "NpadState");
 
-// Front-end publishing: the keyboard / touch path (dm_input_set) and the physical controller path (dm_pad_set) are ORed; press edges are latched until the game's next read so short presses are not lost
-static _Atomic uint64_t g_btn, g_axes, g_latch, g_pad_btn, g_pad_axes, g_pad_latch;
+// Front-end publishing: the keyboard / touch path (dm_input_set), the physical controller path (dm_pad_set) and the scripted path (DM_KEYS, script_set) are ORed; press edges are latched until the game's next read so short presses are not lost
+static _Atomic uint64_t g_btn, g_axes, g_latch, g_pad_btn, g_pad_axes, g_pad_latch, g_s_btn, g_s_axes, g_s_latch;
 static _Atomic int64_t g_sampling;
 static uint64_t pack(int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     return (uint64_t)(uint16_t)lx | (uint64_t)(uint16_t)ly << 16 | (uint64_t)(uint16_t)rx << 32 | (uint64_t)(uint16_t)ry << 48;
@@ -31,9 +31,13 @@ void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t 
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     uint64_t old = atomic_exchange(&g_pad_btn, buttons); atomic_fetch_or(&g_pad_latch, buttons & ~old); atomic_store(&g_pad_axes, pack(lx, ly, rx, ry));
 }
+// Scripted input (DM_KEYS) keeps its own accumulator: the front end polls the physical pad every 1/120 s and overwrites its own state, which would clear a scripted press before the game ever samples it.
+static void script_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+    uint64_t old = atomic_exchange(&g_s_btn, buttons); atomic_fetch_or(&g_s_latch, buttons & ~old); atomic_store(&g_s_axes, pack(lx, ly, rx, ry));
+}
 uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
 // DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down, left stick LLeft LUp LRight LDown;
-//   held 0.15 s by default, at most 1024 steps (counted after repeats are expanded). Goes through the controller path (dm_pad_set), ORed with keyboard / touch, neither overrides the other. Times are counted from host start.
+//   held 0.15 s by default, at most 1024 steps (counted after repeats are expanded). Goes through the scripted-input accumulator (script_set), ORed with keyboard / touch / physical pad, neither overrides the other. Times are counted from host start.
 //   An f before the time means a presented frame number ("f7600:A", and the repeat interval counts frames too): when the machine is busy seconds drift from the game's progress, frame numbers do not (used for the Zelda BotW opening route)
 typedef struct { double at, hold; uint64_t btn; int32_t lx, ly; int frame; } key_step;
 #define KEY_STEPS 1024
@@ -44,7 +48,7 @@ static void *keys_main(void *arg) {
         for (;;) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); double el = (t.tv_sec - t0.tv_sec) + (t.tv_nsec - t0.tv_nsec) / 1e9;
                    if (g_steps[i].frame ? (double)dm_guest_frame() >= g_steps[i].at : el >= g_steps[i].at) break; usleep(5000); }
         LOG("DM_KEYS：%s%.2f 按 %#llx（按住 %.2f s）", g_steps[i].frame ? "帧 " : "", g_steps[i].at, (unsigned long long)g_steps[i].btn, g_steps[i].hold);
-        dm_pad_set(g_steps[i].btn, g_steps[i].lx, g_steps[i].ly, 0, 0); usleep((useconds_t)(g_steps[i].hold * 1e6)); dm_pad_set(0, 0, 0, 0, 0);
+        script_set(g_steps[i].btn, g_steps[i].lx, g_steps[i].ly, 0, 0); usleep((useconds_t)(g_steps[i].hold * 1e6)); script_set(0, 0, 0, 0, 0);
     }
     return NULL;
 }
@@ -81,9 +85,11 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     memset(s, 0, sizeof *s);
     s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
     if (!(style_of(id) & style)) return;   // no controller of this id / style: attributes = 0
-    uint64_t b = atomic_load(&g_btn) | atomic_exchange(&g_latch, 0) | atomic_load(&g_pad_btn) | atomic_exchange(&g_pad_latch, 0);
-    uint64_t k = atomic_load(&g_axes), p = atomic_load(&g_pad_axes);
-    s->lx = pick(ax(k, 0), ax(p, 0)); s->ly = pick(ax(k, 1), ax(p, 1)); s->rx = pick(ax(k, 2), ax(p, 2)); s->ry = pick(ax(k, 3), ax(p, 3));
+    uint64_t b = atomic_load(&g_btn) | atomic_exchange(&g_latch, 0) | atomic_load(&g_pad_btn) | atomic_exchange(&g_pad_latch, 0)
+               | atomic_load(&g_s_btn) | atomic_exchange(&g_s_latch, 0);
+    uint64_t k = atomic_load(&g_axes), p = atomic_load(&g_pad_axes), q = atomic_load(&g_s_axes);
+    s->lx = pick(pick(ax(k, 0), ax(p, 0)), ax(q, 0)); s->ly = pick(pick(ax(k, 1), ax(p, 1)), ax(q, 1));
+    s->rx = pick(pick(ax(k, 2), ax(p, 2)), ax(q, 2)); s->ry = pick(pick(ax(k, 3), ax(p, 3)), ax(q, 3));
     b &= 0xffffull;
     if (s->lx < -STICK_THRESH) b |= 1u << 16;
     if (s->ly > STICK_THRESH) b |= 1u << 17;

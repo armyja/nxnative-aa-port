@@ -3,11 +3,27 @@
 #include "hle.h"
 
 HLE_FORCE("_ZN2nn6socket10InitializeERKNS0_6ConfigE", "连 bsd 套接字服务；离线，不建会话（剪）", Result, h_socket_Initialize, const void *cfg) { (void)cfg; return RES_OK; }
+// Ace Attorney 123 (SDK 5.5): with the privacy policy accepted, the save flow waits for Unity's network-platform
+// init completion, which the game only publishes from an IL2CPP callback that never runs under the host
+// (main+0xe1e640: signals the event the NetworkInterfaceWrapper thread parks on, then clears the flag). Without it
+// "Saving..." hangs and no file is ever written. The init flag is set by the game right after nifm::Initialize
+// returns (byte main+0x29c6c38); once it appears we publish the completion ourselves.
+void aa_net_publish_init(void) {
+    static int done;
+    if (done) return;
+    module_t *m = NULL;
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
+    if (!m || strcmp(m->build_id, "c5b5d28842207c47bd0fc97137e5e75f")) return;   // only this build's addresses
+    if (!*(volatile uint8_t *)(m->base + 0x29c6c38)) return;
+    done = 1;
+    LOG("网络平台初始化完成通知补发（main+0xe1e640）");
+    ((void (*)(void))(m->base + 0xe1e640))();
+}
 HLE_FORCE("_ZN2nn4nifm10InitializeEv", "连 nifm 网络管理服务；离线（剪）", Result, h_nifm_Initialize, void) { return RES_OK; }
-HLE_FORCE("_ZN2nn4nifm20SubmitNetworkRequestEv", "离线：网络请求不提交", void, h_nifm_Submit, void) {}
+HLE_FORCE("_ZN2nn4nifm20SubmitNetworkRequestEv", "离线：网络请求不提交", void, h_nifm_Submit, void) { aa_net_publish_init(); }
 HLE_FORCE("_ZN2nn4nifm20CancelNetworkRequestEv", "离线：无请求可取消", void, h_nifm_Cancel, void) {}
-HLE_FORCE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", "离线：请求不在等待中", int, h_nifm_OnHold, void) { return 0; }
-HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "离线：网络恒不可用", int, h_nifm_Available, void) { return 0; }
+HLE_FORCE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", "离线：请求不在等待中", int, h_nifm_OnHold, void) { aa_net_publish_init(); return 0; }
+HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "离线：网络恒不可用", int, h_nifm_Available, void) { aa_net_publish_init(); return 0; }
 HLE_FORCE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", "离线：报失败，不弹系统联网界面", Result, h_nifm_HandleErr, void) { return RES_FAIL; }
 HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", "离线：无 IP", Result, h_nifm_GetIp, uint32_t *a) { if (a) *a = 0; return RES_FAIL; }
 HLE_FORCE("_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", "离线：无代理设置", Result, h_nifm_GetProxy, void *p) { (void)p; return RES_FAIL; }

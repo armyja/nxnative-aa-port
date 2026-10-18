@@ -586,6 +586,7 @@ ssize_t dm_data_pread(int fd, void *buf, size_t n, off_t off) {   // Same semant
     return (ssize_t)done;
 }
 HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Result, h_fs_OpenFile, uint64_t *out, const char *path, int mode) {
+    if (g_flag.fs) LOG("fs open 尝试 %s mode=%d", path, mode);   // entry log: a hang inside the open would show here and nowhere else
     HP(path);
     if (mode & (MODE_WRITE | MODE_APPEND)) RW();
     int fd = open(hp, (mode & (MODE_WRITE | MODE_APPEND)) ? ((mode & MODE_READ) ? O_RDWR : O_WRONLY) : O_RDONLY);
