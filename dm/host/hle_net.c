@@ -91,6 +91,33 @@ static void aa_gate_uissaveload(const uint64_t *r) { LOG("[aa] SaveLoadUICtrl.Co
 // coroutine (<CoroutineSave>c__Iterator4) is ever started at the press
 extern uint64_t g_meta_buf;
 // GameObject.SetActive(this, active): log only around the save press, so the log stays readable
+static void aa_gate_p1(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 协程检查点1 0x3344a8 帧%llu", (unsigned long long)dm_guest_frame()); }
+static void aa_gate_p2(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 协程检查点2 0x3344c8 帧%llu", (unsigned long long)dm_guest_frame()); }
+static void aa_gate_p3(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 协程检查点3 0x3344d4 帧%llu", (unsigned long long)dm_guest_frame()); }
+static void aa_ck_49(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x33443c 帧%llu", (unsigned long long)dm_guest_frame()); }
+static void aa_ck_50(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x334494 帧%llu", (unsigned long long)dm_guest_frame()); }
+static void aa_ck_51(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x3344b4 帧%llu", (unsigned long long)dm_guest_frame()); }
+static void aa_ck_52(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x334570 帧%llu", (unsigned long long)dm_guest_frame()); }
+static void aa_ck_53(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x3345ec 帧%llu", (unsigned long long)dm_guest_frame()); }
+static void aa_ck_54(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x334600 帧%llu", (unsigned long long)dm_guest_frame()); }
+static void aa_ck_55(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x334648 帧%llu", (unsigned long long)dm_guest_frame()); }
+static void aa_ck_56(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x334684 帧%llu", (unsigned long long)dm_guest_frame()); }
+static void aa_ck_57(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x3346c0 帧%llu", (unsigned long long)dm_guest_frame()); }
+static void aa_ck_58(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x33478c 帧%llu", (unsigned long long)dm_guest_frame()); }
+static void aa_gate_clinit(const uint64_t *r) {
+    if (!getenv("DM_AALOG")) return;
+    extern uint64_t dm_guest_frame(void); extern uint64_t g_meta_buf;
+    uint64_t f = dm_guest_frame();
+    if (f < 10180 || f > 10800) return;
+    uint64_t k = r[0];
+    if (!k || !g_meta_buf) return;
+    uint64_t np = *(volatile uint64_t *)(uintptr_t)(k + 0x10);
+    uint64_t lo = g_meta_buf + 0x45e14, hi = lo + 0xe42b4;
+    char nm[80]; int i = 0;
+    if (np >= lo && np < hi) { for (; i < 79; i++) { char c = *(volatile char *)(uintptr_t)(np + i); if (!c) break; nm[i] = c; } }
+    nm[i] = 0;
+    LOG("[aa] 类初始化 %s 帧%llu", nm, (unsigned long long)f);
+}
 static void aa_gate_save_branch(const uint64_t *r) {
     if (!getenv("DM_AALOG")) return;
     extern uint64_t dm_guest_frame(void);
@@ -154,7 +181,7 @@ static void aa_gate_startcoro(const uint64_t *r) {
     nm[i] = 0;
     if (!strstr(nm, "Save") && !strstr(nm, "save")) return;
     extern uint64_t dm_guest_frame(void);
-    LOG("[aa] StartCoroutine 帧%llu owner=%#llx %s", (unsigned long long)dm_guest_frame(), (unsigned long long)r[0], nm);
+    LOG("[aa] StartCoroutine 帧%llu owner=%#llx 返回地址=%#llx %s", (unsigned long long)dm_guest_frame(), (unsigned long long)r[0], (unsigned long long)r[30], nm);
     if (strstr(nm, "<CoroutineSave>")) g_aa_coro_iter = it;   // poll this iterator's state machine each frame
 }
 static void aa_gate_settext(const uint64_t *r) {
@@ -208,6 +235,21 @@ __attribute__((constructor)) static void aa_obs_gates(void) {
     gate_obs_set(OBS_AA_STOPCORO, aa_gate_stopcoro);
     gate_obs_set(OBS_AA_STOPALL, aa_gate_stopall);
     gate_obs_set(OBS_AA_SAVE_BRANCH, aa_gate_save_branch);
+    gate_obs_set(OBS_AA_SAVE_P1, aa_gate_p1);
+    gate_obs_set(OBS_AA_SAVE_P2, aa_gate_p2);
+    gate_obs_set(OBS_AA_SAVE_P3, aa_gate_p3);
+    gate_obs_set(OBS_AA_CLINIT, aa_gate_clinit);
+    gate_obs_set(49, aa_ck_49);
+    gate_obs_set(50, aa_ck_50);
+    gate_obs_set(51, aa_ck_51);
+    gate_obs_set(52, aa_ck_52);
+    gate_obs_set(53, aa_ck_53);
+    gate_obs_set(54, aa_ck_54);
+    gate_obs_set(55, aa_ck_55);
+    gate_obs_set(56, aa_ck_56);
+    gate_obs_set(57, aa_ck_57);
+    gate_obs_set(58, aa_ck_58);
+
 }
 void aa_net_publish_init(void) {
     static int off = -1; if (off < 0) off = getenv("DM_NET_NOHOOK") != NULL; if (off) return;

@@ -192,6 +192,20 @@ OBS = {
     (0x8e5610, 42, 'f81d0ff5', 'AA：GameObject.SetActive 入口（观察存档窗口是否被停用）'),
     (0x8eea20, 43, 'f81d0ff5', 'AA：MonoBehaviour.StopCoroutine 入口'),
     (0x8eebe0, 44, 'd100c3ff', 'AA：MonoBehaviour.StopAllCoroutines 入口'),
+    # the coroutine body: three after-bl checkpoints tell how far the first MoveNext gets
+    (0x3344a8, 46, 'aa1f03e1', 'AA：存档协程 0x3344a8（new 动画迭代器之后）'),
+    (0x3344c8, 47, 'aa1f03e0', 'AA：存档协程 0x3344c8（启动动画协程之后）'),
+    (0x33443c, 49, '320003e8', 'AA 检查点：0x33443c 类初始化后'),
+    (0x334494, 50, '3900c2d5', 'AA 检查点：0x334494 类初始化末尾'),
+    (0x3344b4, 51, 'aa1403e0', 'AA 检查点：0x3344b4 动画迭代器构造后'),
+    (0x334570, 52, '2a1f03e0', 'AA 检查点：0x334570 状态判定末尾'),
+    (0x3345ec, 53, 'a9000680', 'AA 检查点：0x3345ec 取时间后'),
+    (0x334600, 54, 'aa0003f4', 'AA 检查点：0x334600 格式化后'),
+    (0x334648, 55, 'aa1f03e1', 'AA 检查点：0x334648 保存准备1'),
+    (0x334684, 56, 'aa1f03e1', 'AA 检查点：0x334684 保存准备2'),
+    (0x3346c0, 57, 'aa1f03e1', 'AA 检查点：0x3346c0 保存准备3'),
+    (0x33478c, 58, '2a1403e1', 'AA 检查点：0x33478c 调用存档请求前'),
+    (0xdc9ee0, 59, 'd101c3ff', 'AA：il2cpp 类初始化入口（记录存档过程中初始化的类）'),
   ],
   # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
   # On hardware the dispatcher thread (priority 30, core 0 only) preempts the main thread (priority 44, core 0) at once and finishes first; the host waits for the ring to empty after each post (hle_movie.c movie_ring_wait). The gates sit on the add x22, x22, #8 after the bl
