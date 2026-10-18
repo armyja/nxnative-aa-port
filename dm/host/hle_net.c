@@ -40,7 +40,43 @@ static void aa_gate_issave(const uint64_t *r) { LOG("[aa] get_is_save_"); aa_sav
 static void aa_gate_uiconf(const uint64_t *r) { LOG("[aa] SaveLoadUICtrl.SaveConfirmation"); aa_save_gate(r); }
 static void aa_gate_corosave(const uint64_t *r) { LOG("[aa] SaveConfirmationWindow.CoroutineSave"); aa_save_gate(r); }
 static void aa_gate_corosaveanim(const uint64_t *r) { LOG("[aa] CoroutineSaveAnim"); aa_save_gate(r); }
-static void aa_gate_openwin(const uint64_t *r) { LOG("[aa] SaveConfirmationWindow.OpenWindow"); aa_save_gate(r); }
+static module_t *aa_main_module(void) {
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return &g_mod[i];
+    return NULL;
+}
+static volatile uint64_t g_aa_save_window;   // SaveConfirmationWindow instance of the open dialog
+static volatile int g_aa_save_slot = -1;      // slot it was opened for
+static void aa_gate_openwin(const uint64_t *r) {
+    LOG("[aa] SaveConfirmationWindow.OpenWindow");
+    g_aa_save_window = r[0];
+    g_aa_save_slot = (int)*(volatile int32_t *)(uintptr_t)(r[0] + 0x20);   // OpenWindow stores the slot at +0x20
+    extern uint64_t dm_guest_frame(void);
+    LOG("[aa] 存档对话框打开：window=%#llx slot=%d 帧%llu", (unsigned long long)r[0], g_aa_save_slot, (unsigned long long)dm_guest_frame());
+    aa_save_gate(r);
+}
+// Host-side save trigger: run the game's own SaveGameDataRequest for the slot the dialog was opened for. The save UI's
+// coroutine never resumes on the host, so without this the dialog stays forever and nothing is written.
+void aa_host_save_request(void) {
+    static int busy;
+    if (busy) return;
+    module_t *m = aa_main_module();
+    if (!m || strcmp(m->build_id, "c5b5d28842207c47bd0fc97137e5e75f")) return;
+    int slot = g_aa_save_slot;
+    if (slot < 0) slot = 0;
+    busy = 1;
+    LOG("宿主触发存档：SaveGameDataRequest(slot=%d)（游戏内存档代码）", slot);
+    ((void (*)(uint64_t, uint64_t))(m->base + 0x3348e0))(0, (uint64_t)(uint32_t)slot);
+    LOG("宿主触发存档：返回（应已写盘并提交）");
+    busy = 0;
+    // Optional: dismiss the dialog ourselves (the save coroutine that would normally hide it never resumes)
+    const char *ce = getenv("DM_AA_AUTOCLOSE");
+    if (ce && atoi(ce) && g_aa_save_window) {
+        uint64_t inst = ((uint64_t (*)(void))(m->base + 0x337b40))();   // SaveLoadUICtrl.get_instance()
+        LOG("宿主关闭存档对话框：UICtrl=%#llx", (unsigned long long)inst);
+        if (inst) ((void (*)(uint64_t))(m->base + 0x33a2f0))(inst);     // SaveLoadUICtrl.Close()
+        LOG("宿主关闭存档对话框：返回");
+    }
+}
 static void aa_gate_loadplay(const uint64_t *r) { LOG("[aa] LoadingPlay"); aa_save_gate(r); }
 static void aa_gate_loadwait(const uint64_t *r) { LOG("[aa] LoadingWait"); aa_save_gate(r); }
 static void aa_gate_uissaveload(const uint64_t *r) { LOG("[aa] SaveLoadUICtrl.CoroutineSaveLoad"); aa_save_gate(r); }
@@ -64,10 +100,6 @@ static void aa_gate_stopall(const uint64_t *r) {
     if (!getenv("DM_AALOG")) return;
     extern uint64_t dm_guest_frame(void);
     LOG("[aa] StopAllCoroutines 帧%llu this=%#llx", (unsigned long long)dm_guest_frame(), (unsigned long long)r[0]);
-}
-static module_t *aa_main_module(void) {
-    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return &g_mod[i];
-    return NULL;
 }
 // SaveControl.is_save_ (static fields + 6) at this instant: tells which branch the save coroutine takes
 static int aa_is_save_flag(module_t *m) {
@@ -180,7 +212,17 @@ HLE_FORCE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", "离线：请求不在等待�
 // Probe: call the game's own C# save request from the host at a given frame (bypassing the stuck save menu), to tell
 // "the menu never calls it" apart from "the save code itself is broken". DM_AA_CALL_SAVE=<frame>:<slot>
 void aa_call_save_probe(void) {
-    static int done;
+    static int done, autosave_frames = -2; static uint64_t opened_at;
+    // DM_AA_AUTOSAVE=<frames after the dialog opens>; unset = on with the default 20 frames for this build (the save
+    // UI's coroutine never resumes on the host, so the game's own SaveGameDataRequest is called by the host instead),
+    // DM_AA_AUTOSAVE=0 disables it
+    if (autosave_frames == -2) { const char *e = getenv("DM_AA_AUTOSAVE"); autosave_frames = e ? atoi(e) : 20; }
+    if (autosave_frames > 0) {
+        extern uint64_t dm_guest_frame(void);
+        static uint64_t last_win;
+        if (g_aa_save_window && g_aa_save_window != last_win) { last_win = g_aa_save_window; opened_at = dm_guest_frame(); }
+        if (g_aa_save_window && !done && dm_guest_frame() >= opened_at + (uint64_t)autosave_frames) { done = 1; aa_host_save_request(); return; }
+    }
     const char *e = getenv("DM_AA_CALL_SAVE");
     if (!e || done) return;
     unsigned frame = 0, slot = 0;
