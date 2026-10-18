@@ -449,6 +449,7 @@ const char *dm_save_commitdir(void) { for (int i = 0; i < g_nmnt; i++) if (g_mnt
 void (*g_dm_mount_seed_hook)(const char *save_dir);   // called before mounting the save (save dir): adds the files the host needs to the save
 HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv；存档 → 宿主目录（单用户）", Result, h_fs_MountSave, const char *name, const void *uid) {
     (void)uid;
+    if (g_flag.fs) LOG("fs MountSaveData(name=\"%s\")", name ? name : "(null)");
     // No default directory: silently landing on a directory with no characters distorts the "character select" measurement (this once caused a misjudgment). Runs always use a fresh copy of save_ref
     const char *d = getenv("DM_SAVE");
     if (!d) die("未设 DM_SAVE：请指向一份存档目录的可写副本");

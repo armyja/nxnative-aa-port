@@ -91,7 +91,25 @@ HLE_FORCE("_ZN2nn4nifm10InitializeEv", "连 nifm 网络管理服务；离线（�
 HLE_FORCE("_ZN2nn4nifm20SubmitNetworkRequestEv", "离线：网络请求不提交", void, h_nifm_Submit, void) { aa_net_publish_init(); }
 HLE_FORCE("_ZN2nn4nifm20CancelNetworkRequestEv", "离线：无请求可取消", void, h_nifm_Cancel, void) {}
 HLE_FORCE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", "离线：请求不在等待中", int, h_nifm_OnHold, void) { aa_net_publish_init(); return 0; }
-HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "离线：网络恒不可用", int, h_nifm_Available, void) { aa_net_publish_init(); const char *e = getenv("DM_NET_FAKE"); return e && atoi(e) ? 1 : 0; }
+// Probe: call the game's own C# save request from the host at a given frame (bypassing the stuck save menu), to tell
+// "the menu never calls it" apart from "the save code itself is broken". DM_AA_CALL_SAVE=<frame>:<slot>
+void aa_call_save_probe(void) {
+    static int done;
+    const char *e = getenv("DM_AA_CALL_SAVE");
+    if (!e || done) return;
+    unsigned frame = 0, slot = 0;
+    if (sscanf(e, "%u:%u", &frame, &slot) != 2) return;
+    extern uint64_t dm_guest_frame(void);
+    if (dm_guest_frame() < frame) return;
+    done = 1;
+    module_t *m = NULL;
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
+    if (!m || strcmp(m->build_id, "c5b5d28842207c47bd0fc97137e5e75f")) return;
+    LOG("探针：直接调用 SaveGameDataRequest(slot=%u) main+0x3348e0", slot);
+    ((void (*)(uint64_t, uint64_t))(m->base + 0x3348e0))(0, slot);
+    LOG("探针：SaveGameDataRequest 返回");
+}
+HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "离线：网络恒不可用", int, h_nifm_Available, void) { aa_net_publish_init(); aa_call_save_probe(); const char *e = getenv("DM_NET_FAKE"); return e && atoi(e) ? 1 : 0; }
 HLE_FORCE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", "离线：报失败，不弹系统联网界面", Result, h_nifm_HandleErr, void) { return RES_FAIL; }
 HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", "离线：无 IP", Result, h_nifm_GetIp, uint32_t *a) { if (a) *a = 0; return RES_FAIL; }
 HLE_FORCE("_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", "离线：无代理设置", Result, h_nifm_GetProxy, void *p) { (void)p; return RES_FAIL; }
