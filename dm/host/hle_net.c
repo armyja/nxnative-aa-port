@@ -54,7 +54,7 @@ static void aa_gate_openwin(const uint64_t *r) {
     LOG("[aa] 存档对话框打开：window=%#llx slot=%d 帧%llu", (unsigned long long)r[0], g_aa_save_slot, (unsigned long long)dm_guest_frame());
     aa_save_gate(r);
 }
-static uint64_t g_aa_release_b_at;
+static uint64_t g_aa_release_b_at, g_aa_refresh_at;
 // Host-side save trigger: run the game's own SaveGameDataRequest for the slot the dialog was opened for. The save UI's
 // coroutine never resumes on the host, so without this the dialog stays forever and nothing is written.
 void aa_host_save_request(void) {
@@ -226,12 +226,30 @@ void aa_call_save_probe(void) {
     if (g_aa_coro_iter) {
         static int last = -99; extern uint64_t dm_guest_frame(void);
         int st = *(volatile int32_t *)(uintptr_t)(g_aa_coro_iter + 0x2c);
-        if (st != last) { LOG("[aa] 存档协程状态 %d → %d（帧%llu）", last, st, (unsigned long long)dm_guest_frame()); last = st; }
+        int c28 = *(volatile uint8_t *)(uintptr_t)(g_aa_coro_iter + 0x28);
+        static int last28 = -99;
+        if (st != last || c28 != last28) { LOG("[aa] 存档协程状态 %d → %d（取消标志 +0x28=%d，帧%llu）", last, st, c28, (unsigned long long)dm_guest_frame()); last = st; last28 = c28; }
     }
     if (g_aa_release_b_at) {
         extern void dm_script_set(uint64_t, int32_t, int32_t, int32_t, int32_t);
         extern uint64_t dm_guest_frame(void);
-        if (dm_guest_frame() >= g_aa_release_b_at) { dm_script_set(0, 0, 0, 0, 0); g_aa_release_b_at = 0; }
+        if (dm_guest_frame() >= g_aa_release_b_at) {
+            dm_script_set(0, 0, 0, 0, 0); g_aa_release_b_at = 0;
+            g_aa_refresh_at = dm_guest_frame() + 20;   // let the UI settle, then refresh the slot list
+        }
+    }
+    if (g_aa_refresh_at) {
+        extern uint64_t dm_guest_frame(void);
+        if (dm_guest_frame() >= g_aa_refresh_at) {
+            g_aa_refresh_at = 0;
+            module_t *m = aa_main_module();
+            if (m && !strcmp(m->build_id, "c5b5d28842207c47bd0fc97137e5e75f")) {
+                uint64_t inst = ((uint64_t (*)(void))(m->base + 0x337b40))();      // SaveLoadUICtrl.get_instance()
+                LOG("刷新存档槽列表：UICtrl=%#llx", (unsigned long long)inst);
+                if (inst) ((void (*)(uint64_t))(m->base + 0x338460))(inst);        // UpdateSlotList()
+                LOG("刷新存档槽列表：返回");
+            }
+        }
     }
     static int done, autosave_frames = -2; static uint64_t opened_at;
     // DM_AA_AUTOSAVE=<frames after the dialog opens>; unset = on with the default 20 frames for this build (the save
