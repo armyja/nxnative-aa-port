@@ -7,6 +7,9 @@
 #include <unistd.h>
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
+#include <VideoToolbox/VideoToolbox.h>
+#include <CoreMedia/CoreMedia.h>
+#include <CoreVideo/CoreVideo.h>
 // Vorbis (movie audio tracks, Link's Awakening): stb_vorbis, built into this file (dm/third_party/stb_vorbis); only its push-data API, floats out
 #define STB_VORBIS_NO_STDIO
 #define STB_VORBIS_NO_PULLDATA_API
@@ -47,6 +50,7 @@ HLE_FORCE("_ZN5movie9Extractor13SetDataSourceEPKc", "影片拆封装：宿主还
 #define MD_FMT_NV12 4
 #define MD_FMT_ABGR 3            // 4-byte RGBA (memory order R G B A), only with the native texture mode
 #define MD_MODE_TEX 2            // native texture mode: the decoder writes frames into the client's NVN texture
+#define MD_TYPE_AVC 1           // H.264: decoded with VideoToolbox (hardware / software)
 #define MD_TYPE_VP9 3
 #define MD_TYPE_VORBIS 5         // audio: the SDK's Decoder accepts AAC (4) and Vorbis (5) in CPU mode, output format 1 only (interleaved PCM16)
 #define MD_FMT_PCM16 1
@@ -63,8 +67,15 @@ typedef struct {
     struct { int in, off, size; int64_t pts; uint32_t flags; } pend[MD_NIN]; int npend;   // input packets waiting to be decoded (in arrival order)
     // Decoding: dmu lets only one guest thread take and decode packets at a time (packets enter libvpx in order); wmu / wcv hand one job to the host thread and wait for it
     pthread_mutex_t dmu, wmu; pthread_cond_t wcv; pthread_t wk;
-    int job; const uint8_t *jp; int jn, jslot, jgot;
+    int job; const uint8_t *jp; int jn, jslot, jgot; int64_t jpts;
     vpx_codec_ctx_t vpx; int vpx_on, red_dec, red_img;
+    // AVC (H.264): parameter sets from Configure's csd-0 / csd-1 (AVCC) or the first Annex B packet; frames come from VideoToolbox
+    uint8_t *avc_csd; int avc_csd_n;                          // copies of csd-0 + csd-1
+    void *vt_fmt, *vt_sess;                                   // CMVideoFormatDescriptionRef / VTDecompressionSessionRef
+    void *avc_q[MD_NOUT * 2]; int64_t avc_qpts[MD_NOUT * 2]; int avc_nq;   // decoded CVPixelBuffers in display order (B-frame reordering), with their own PTS
+    int64_t jgot_pts;
+    int avc_out_n;                                            // outputs delivered by the decoder so far
+    int red_avc;
     // Vorbis: the identification and setup headers from Configure's MediaData ("csd-0", "csd-1", as with Android's MediaCodec), the decoder (opened at the first packet), channels / rate, Ogg page sequence
     uint8_t *vhdr[2]; int vhdr_n[2]; stb_vorbis *vb; int ch, rate; uint32_t ogg_seq; int64_t ogg_gran; int red_vb;
     uint64_t dec_n, dec_ns, dec_max;            // decode timing (on the host thread, per packet)
@@ -197,6 +208,150 @@ static void md_nv12(const vpx_image_t *im, uint8_t *dst, int w, int h) {
         for (; x < cw2 && 2 * x + 1 < w; x++) { o[2 * x] = u[x]; o[2 * x + 1] = v[x]; }
     }
 }
+// ---------- AVC (H.264) via VideoToolbox ----------
+// Android's MediaCodec hands H.264 in AVCC form: csd-0 (and sometimes csd-1) carry SPS+PPS as 4-byte-length-prefixed NALs, and input packets are
+// length-prefixed the same way. Annex B packets (start codes) are converted first. Output is NV12; frames are copied into the slot in the tight
+// layout the client reads (stride = width, plane height = height), the same as the VP9 path.
+static void avc_frame(void *refcon, void *frame_refcon, OSStatus status, VTDecodeInfoFlags info, CVImageBufferRef image, CMTime pts, CMTime dur) {
+    (void)frame_refcon; (void)info; (void)pts; (void)dur;
+    mdec_t *d = refcon;
+    if (status != noErr || !image) return;
+    CVPixelBufferRef pb = (CVPixelBufferRef)CFRetain(image);
+    int64_t us = CMTIME_IS_VALID(pts) ? (int64_t)(CMTimeGetSeconds(pts) * 1000000.0) : -1;
+    pthread_mutex_lock(&d->mu);
+    if (d->avc_nq < (int)(sizeof d->avc_q / sizeof *d->avc_q)) { d->avc_qpts[d->avc_nq] = us; d->avc_q[d->avc_nq++] = pb; }
+    else CFRelease(pb);
+    d->avc_out_n++;
+    pthread_mutex_unlock(&d->mu);
+}
+// find SPS (type 7) / PPS (type 8) in an AVCC (length-prefixed) or Annex B buffer; returns 1 when both were found
+static int avc_ps(const uint8_t *p, int n, const uint8_t **sps, size_t *spsn, const uint8_t **pps, size_t *ppsn) {
+    *sps = *pps = NULL; *spsn = *ppsn = 0;
+    if (n >= 4 && p[0] == 0 && p[1] == 0 && (p[2] == 1 || (p[2] == 0 && p[3] == 1))) {   // Annex B start codes
+        int i = 0;
+        while (i + 3 < n) {
+            if (!(p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1)) { i++; continue; }
+            int st = i + 3, e = st;
+            while (e + 2 < n && !(p[e] == 0 && p[e + 1] == 0 && p[e + 2] == 1)) e++;
+            if (e + 2 >= n) e = n;
+            int type = p[st] & 0x1f;
+            if (type == 7 && !*sps) { *sps = p + st; *spsn = (size_t)(e - st); }
+            else if (type == 8 && !*pps) { *pps = p + st; *ppsn = (size_t)(e - st); }
+            i = e;
+        }
+        return *sps && *pps;
+    }
+    int i = 0;   // AVCC: 4-byte big-endian lengths
+    while (i + 4 <= n) {
+        uint32_t len = (uint32_t)p[i] << 24 | (uint32_t)p[i + 1] << 16 | (uint32_t)p[i + 2] << 8 | p[i + 3];
+        if (!len || i + 4 + (int)len > n) break;
+        int type = p[i + 4] & 0x1f;
+        if (type == 7 && !*sps) { *sps = p + i + 4; *spsn = len; }
+        else if (type == 8 && !*pps) { *pps = p + i + 4; *ppsn = len; }
+        i += 4 + (int)len;
+    }
+    return *sps && *pps;
+}
+static uint8_t *avc_to_avcc(const uint8_t *p, int n, int *out_n) {
+    size_t cap = (size_t)n + 64; uint8_t *o = malloc(cap); if (!o) return NULL;
+    size_t w = 0; int i = 0;
+    while (i + 3 < n) {
+        if (!(p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1)) { i++; continue; }
+        int st = i + 3, e = st;
+        while (e + 2 < n && !(p[e] == 0 && p[e + 1] == 0 && p[e + 2] == 1)) e++;
+        if (e + 2 >= n) e = n;
+        size_t len = (size_t)(e - st);
+        if (w + 4 + len > cap) { cap = cap * 2 + len + 64; uint8_t *q = realloc(o, cap); if (!q) { free(o); return NULL; } o = q; }
+        o[w++] = (uint8_t)(len >> 24); o[w++] = (uint8_t)(len >> 16); o[w++] = (uint8_t)(len >> 8); o[w++] = (uint8_t)len;
+        memcpy(o + w, p + st, len); w += len;
+        i = e;
+    }
+    *out_n = (int)w; return o;
+}
+static int md_avc_setup(mdec_t *d, const uint8_t *p, int n) {
+    const uint8_t *sps = NULL, *pps = NULL; size_t spsn = 0, ppsn = 0;
+    if (d->avc_csd && d->avc_csd_n) avc_ps(d->avc_csd, d->avc_csd_n, &sps, &spsn, &pps, &ppsn);
+    if ((!sps || !pps) && n > 0) avc_ps(p, n, &sps, &spsn, &pps, &ppsn);
+    if (!sps || !pps) { if (!d->red_avc++) LOG("【红】影片：AVC 找不到 SPS/PPS（首个包 %d 字节），出黑帧", n); return 0; }
+    const uint8_t *ps[2] = { sps, pps }; size_t sz[2] = { spsn, ppsn };
+    CMVideoFormatDescriptionRef fmt = NULL;
+    OSStatus st = CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault, 2, ps, sz, 4, &fmt);
+    if (st != noErr || !fmt) { if (!d->red_avc++) LOG("【红】影片：AVC 参数集建格式描述失败（%d）", (int)st); return 0; }
+    CFMutableDictionaryRef attrs = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    int32_t pf = d->fmt == MD_FMT_ABGR ? kCVPixelFormatType_32BGRA : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    CFNumberRef nf = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &pf);
+    CFDictionarySetValue(attrs, kCVPixelBufferPixelFormatTypeKey, nf); CFRelease(nf);
+    CFDictionaryRef io = CFDictionaryCreate(kCFAllocatorDefault, NULL, NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(attrs, kCVPixelBufferIOSurfacePropertiesKey, io); CFRelease(io);
+    VTDecompressionSessionRef sess = NULL;
+    VTDecompressionOutputCallbackRecord cb = { avc_frame, d };
+    st = VTDecompressionSessionCreate(kCFAllocatorDefault, fmt, NULL, attrs, &cb, &sess);
+    CFRelease(attrs);
+    if (st != noErr || !sess) { CFRelease(fmt); if (!d->red_avc++) LOG("【红】影片：VideoToolbox 建 AVC 解码会话失败（%d）", (int)st); return 0; }
+    d->vt_fmt = fmt; d->vt_sess = sess;
+    LOG("[影片] VideoToolbox：AVC 解码器就绪（SPS %zu 字节，PPS %zu 字节）", spsn, ppsn);
+    return 1;
+}
+static int md_avc(mdec_t *d, const uint8_t *p, int n, int slot, int64_t pts) {   // pts: this packet's time; the frame returned carries its own (see jgot_pts)
+    if (!d->vt_sess && !md_avc_setup(d, p, n)) return 0;
+    if (n > 0) {
+        int anne = n >= 4 && p[0] == 0 && p[1] == 0 && (p[2] == 1 || (p[2] == 0 && p[3] == 1));
+        uint8_t *conv = NULL; const uint8_t *in = p; size_t in_n = (size_t)n;
+        if (anne) { int cn = 0; conv = avc_to_avcc(p, n, &cn); if (!conv || cn <= 0) { free(conv); return 0; } in = conv; in_n = (size_t)cn; }
+        CMBlockBufferRef bb = NULL; CMSampleBufferRef sb = NULL; OSStatus st;
+        st = CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL, in_n, kCFAllocatorDefault, NULL, 0, in_n, kCMBlockBufferAssureMemoryNowFlag, &bb);
+        if (st == noErr) st = CMBlockBufferReplaceDataBytes(in, bb, 0, in_n);
+        if (st == noErr) {
+            CMSampleTimingInfo tm = { .duration = CMTimeMake(1, 30), .presentationTimeStamp = CMTimeMake(pts > 0 ? pts : 0, 1000000), .decodeTimeStamp = kCMTimeInvalid };
+            st = CMSampleBufferCreateReady(kCFAllocatorDefault, bb, (CMVideoFormatDescriptionRef)d->vt_fmt, 1, 1, &tm, 0, NULL, &sb);
+        }
+        if (bb) CFRelease(bb);
+        free(conv);
+        if (st != noErr || !sb) { if (!d->red_avc++) LOG("【红】影片：AVC 样本缓冲建失败（%d）", (int)st); return 0; }
+        VTDecodeInfoFlags info = 0;
+        st = VTDecompressionSessionDecodeFrame(d->vt_sess, sb, 0, NULL, &info);
+        CFRelease(sb);
+        if (st != noErr) { if (!d->red_avc++) LOG("【红】影片：AVC 解码失败（%d）", (int)st); return 0; }
+    }
+    // one decoded frame per packet: the decoder may hold frames back for reordering, they come out on later packets
+    void *pb = NULL;
+    pthread_mutex_lock(&d->mu);
+    if (d->avc_nq) {
+        pb = d->avc_q[0]; d->jgot_pts = d->avc_qpts[0];
+        memmove(d->avc_q, d->avc_q + 1, (size_t)(--d->avc_nq) * sizeof *d->avc_q);
+        memmove(d->avc_qpts, d->avc_qpts + 1, (size_t)d->avc_nq * sizeof *d->avc_qpts);
+    }
+    pthread_mutex_unlock(&d->mu);
+    if (!pb) return 0;
+    CVPixelBufferRef px = (CVPixelBufferRef)pb;
+    CVPixelBufferLockBaseAddress(px, kCVPixelBufferLock_ReadOnly);
+    size_t pw = CVPixelBufferGetWidth(px), ph = CVPixelBufferGetHeight(px);
+    int w = d->w, h = d->h;
+    int cw = pw < (size_t)w ? (int)pw : w, ch = ph < (size_t)h ? (int)ph : h;
+    if (d->fmt == MD_FMT_ABGR) {   // native texture mode: VideoToolbox gives BGRA; the client texture takes RGBA (memory order R G B A)
+        size_t need = (size_t)w * h * 4;
+        if (d->out[slot].cap < need) { free(d->out[slot].frm); d->out[slot].frm = malloc(need); d->out[slot].cap = need; }
+        uint8_t *dst = d->out[slot].frm, *src = (uint8_t *)CVPixelBufferGetBaseAddress(px);
+        size_t bpr = CVPixelBufferGetBytesPerRow(px);
+        if (cw < w || ch < h) for (size_t i = 0; i < (size_t)w * h; i++) ((uint32_t *)dst)[i] = 0xff000000u;
+        if (src) for (int r = 0; r < ch; r++) {
+            const uint8_t *s = src + (size_t)r * bpr; uint8_t *o = dst + (size_t)r * w * 4;
+            for (int x = 0; x < cw; x++) { o[4 * x] = s[4 * x + 2]; o[4 * x + 1] = s[4 * x + 1]; o[4 * x + 2] = s[4 * x]; o[4 * x + 3] = s[4 * x + 3]; }
+        }
+    } else {
+        uint8_t *yp = (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(px, 0), *uvp = (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(px, 1);
+        size_t ys = CVPixelBufferGetBytesPerRowOfPlane(px, 0), uvs = CVPixelBufferGetBytesPerRowOfPlane(px, 1);
+        size_t need = (size_t)w * h * 3 / 2;
+        if (d->out[slot].cap < need) { free(d->out[slot].frm); d->out[slot].frm = malloc(need); d->out[slot].cap = need; }
+        uint8_t *dst = d->out[slot].frm;
+        if (cw < w || ch < h) { memset(dst, 16, (size_t)w * h); memset(dst + (size_t)w * h, 128, (size_t)w * h / 2); }
+        if (yp) for (int r = 0; r < ch; r++) memcpy(dst + (size_t)r * w, yp + (size_t)r * ys, (size_t)cw);
+        if (uvp) for (int r = 0; r < ch / 2; r++) memcpy(dst + (size_t)w * h + (size_t)r * w, uvp + (size_t)r * uvs, (size_t)cw);
+    }
+    CVPixelBufferUnlockBaseAddress(px, kCVPixelBufferLock_ReadOnly);
+    CVBufferRelease(px);
+    return 1;
+}
 // I420 → RGBA (native texture mode): by the colour space and range the picture declares (VP9 colour config; when undeclared BT.709 from 720 lines up, else BT.601), 16-bit fixed point; a smaller picture is padded with black, a larger one cropped
 static void md_rgba(const vpx_image_t *im, uint8_t *dst, int w, int h) {
     int full = im->range == VPX_CR_FULL_RANGE, b709 = im->cs == VPX_CS_BT_709 || (im->cs == VPX_CS_UNKNOWN && h >= 720);
@@ -290,7 +445,13 @@ static int md_vorbis(mdec_t *d, const uint8_t *p, int n, int slot) {
     d->out[slot].bytes = need;
     return 1;
 }
-static void md_close(mdec_t *d) { if (d->vpx_on) { vpx_codec_destroy(&d->vpx); d->vpx_on = 0; } if (d->vb) { stb_vorbis_close(d->vb); d->vb = NULL; } }
+static void md_close(mdec_t *d) {
+    if (d->vpx_on) { vpx_codec_destroy(&d->vpx); d->vpx_on = 0; }
+    if (d->vb) { stb_vorbis_close(d->vb); d->vb = NULL; }
+    for (int i = 0; i < d->avc_nq; i++) CVBufferRelease((CVPixelBufferRef)d->avc_q[i]); d->avc_nq = 0;
+    if (d->vt_sess) { VTDecompressionSessionInvalidate((VTDecompressionSessionRef)d->vt_sess); CFRelease((VTDecompressionSessionRef)d->vt_sess); d->vt_sess = NULL; }
+    if (d->vt_fmt) { CFRelease((CMVideoFormatDescriptionRef)d->vt_fmt); d->vt_fmt = NULL; }
+}
 static void *md_worker(void *arg) {
     mdec_t *d = arg;
     pthread_setname_np("dm 影片解码 | movie decoder");
@@ -301,7 +462,9 @@ static void *md_worker(void *arg) {
         pthread_mutex_unlock(&d->wmu);
         if (job == MDJ_DECODE) {
             uint64_t t0 = now_ns();
-            d->jgot = d->type == MD_TYPE_VORBIS ? md_vorbis(d, d->jp, d->jn, d->jslot) : md_vp9(d, d->jp, d->jn, d->jslot);
+            d->jgot = d->type == MD_TYPE_VORBIS ? md_vorbis(d, d->jp, d->jn, d->jslot)
+                    : d->type == MD_TYPE_AVC ? md_avc(d, d->jp, d->jn, d->jslot, d->jpts)
+                    : md_vp9(d, d->jp, d->jn, d->jslot);
             uint64_t dt = now_ns() - t0; d->dec_n++; d->dec_ns += dt; if (dt > d->dec_max) d->dec_max = dt;
         }
         else md_close(d);
@@ -332,12 +495,14 @@ static void md_pump(mdec_t *d) {
         d->out[slot].used = 1;
         pthread_mutex_unlock(&d->mu);
         int got = 0;
-        if (pk.size > 0 && (d->type == MD_TYPE_VP9 || d->type == MD_TYPE_VORBIS)) { d->jp = d->in[pk.in] + pk.off; d->jn = pk.size; d->jslot = slot; md_job(d, MDJ_DECODE); got = d->jgot; }
+        int decoded = d->type == MD_TYPE_VP9 || d->type == MD_TYPE_VORBIS || d->type == MD_TYPE_AVC;
+        if (d->type == MD_TYPE_AVC) { d->jp = d->in[pk.in] + pk.off; d->jn = pk.size; d->jslot = slot; d->jpts = pk.pts; md_job(d, MDJ_DECODE); got = d->jgot; }
+        else if (pk.size > 0 && decoded) { d->jp = d->in[pk.in] + pk.off; d->jn = pk.size; d->jslot = slot; d->jpts = pk.pts; md_job(d, MDJ_DECODE); got = d->jgot; }
         int eos = (pk.flags & 4) != 0;   // MediaCodec BUFFER_FLAG_END_OF_STREAM
         pthread_mutex_lock(&d->mu);
         d->infree[d->ninfree++] = pk.in;
-        int ready = got || eos || (d->type != MD_TYPE_VP9 && d->type != MD_TYPE_VORBIS);   // an end-of-stream packet without a picture still yields an output to carry the flag back; AVC / VP8 have no decoder and give black frames
-        if (ready) { d->out[slot].pic = got; d->out[slot].pts = pk.pts; d->out[slot].flags = pk.flags; d->outq[d->noutq++] = slot; }
+        int ready = got || eos || (d->type != MD_TYPE_VP9 && d->type != MD_TYPE_VORBIS && d->type != MD_TYPE_AVC);   // an end-of-stream packet without a picture still yields an output to carry the flag back; VP8 has no decoder and gives black frames
+        if (ready) { d->out[slot].pic = got; d->out[slot].pts = (got && d->type == MD_TYPE_AVC && d->jgot_pts >= 0) ? d->jgot_pts : pk.pts; d->out[slot].flags = pk.flags; d->outq[d->noutq++] = slot; }
         else d->out[slot].used = 0;
         pthread_mutex_unlock(&d->mu);
         md_event(d, 0);
@@ -356,7 +521,8 @@ HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11De
     // Audio: Vorbis to PCM16 (Link's Awakening's movies carry a Vorbis track; without a decoder the SDK's player plays them silent)
     int audio = type == MD_TYPE_VORBIS && fmt == MD_FMT_PCM16;
     if (!audio && (type < 1 || type > 3 || (fmt != MD_FMT_NV12 && !(fmt == MD_FMT_ABGR && mode == MD_MODE_TEX)))) { LOG("【红】影片：解码器类型 %d 输出 %d 模式 %d 宿主不支持，各方法回失败", type, fmt, mode); return; }
-    if (!audio && type != MD_TYPE_VP9) LOG("【红】影片：解码器类型 %d（AVC / VP8）宿主不解码，出黑帧", type);
+    if (!audio && type == MD_TYPE_AVC) LOG("[影片] 解码器类型 1：AVC/H.264 由 VideoToolbox 解码");
+    else if (!audio && type != MD_TYPE_VP9) LOG("【红】影片：解码器类型 %d（VP8）宿主不解码，出黑帧", type);
     mdec_t *d = calloc(1, sizeof *d);
     pthread_mutex_init(&d->mu, NULL); pthread_mutex_init(&d->dmu, NULL); pthread_mutex_init(&d->wmu, NULL); pthread_cond_init(&d->wcv, NULL);
     d->type = type; d->fmt = fmt; d->mode = mode;
@@ -378,7 +544,7 @@ static void md_free(void **self) {
     pthread_join(d->wk, NULL);
     for (int i = 0; i < MD_NIN; i++) free(d->in[i]);
     for (int k = 0; k < MD_NOUT; k++) free(d->out[k].frm);
-    free(d->vhdr[0]); free(d->vhdr[1]);
+    free(d->vhdr[0]); free(d->vhdr[1]); free(d->avc_csd);
     pthread_mutex_destroy(&d->mu); pthread_mutex_destroy(&d->dmu); pthread_mutex_destroy(&d->wmu); pthread_cond_destroy(&d->wcv); free(d);
 }
 HLE_FORCE("_ZN5movie7DecoderD2Ev", "影片解码器析构：释放宿主对象", void, h_movie_DecD2, void **self) { md_free(self); }
@@ -396,6 +562,17 @@ HLE_FORCE("_ZN5movie7Decoder9ConfigureEPNS_9MediaDataE", "影片解码器配置"
         if (ch > 0) d->ch = ch; if (rate > 0) d->rate = rate;
         MD_TRACE(d, 0, "Configure（Vorbis）：%d 声道 %d Hz，头 %d + %d 字节", ch, rate, d->vhdr_n[0], d->vhdr_n[1]);
         return 0;
+    }
+    if (d->type == MD_TYPE_AVC && md) {   // parameter sets for VideoToolbox: csd-0 (SPS+PPS) and optionally csd-1
+        size_t total = 0; void *b0 = NULL, *b1 = NULL;
+        if (G.find_buf(md, "csd-0", &b0) && b0 && G.data(b0) && G.size(b0)) total += G.size(b0);
+        if (G.find_buf(md, "csd-1", &b1) && b1 && G.data(b1) && G.size(b1)) total += G.size(b1);
+        if (total) {
+            free(d->avc_csd); d->avc_csd = malloc(total); d->avc_csd_n = 0;
+            if (b0 && G.data(b0) && G.size(b0)) { memcpy(d->avc_csd, G.data(b0), G.size(b0)); d->avc_csd_n += (int)G.size(b0); }
+            if (b1 && G.data(b1) && G.size(b1)) { memcpy(d->avc_csd + d->avc_csd_n, G.data(b1), G.size(b1)); d->avc_csd_n += (int)G.size(b1); }
+            LOG("[影片] Configure（AVC）：csd %d 字节", d->avc_csd_n);
+        }
     }
     int w = 0, h = 0; if (md) { G.find_i32(md, "width", &w); G.find_i32(md, "height", &h); }
     pthread_mutex_lock(&d->mu); if (w > 0 && h > 0 && !d->fmt_sent) { d->w = w; d->h = h; } pthread_mutex_unlock(&d->mu);
