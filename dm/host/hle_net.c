@@ -47,11 +47,46 @@ static void aa_gate_uissaveload(const uint64_t *r) { LOG("[aa] SaveLoadUICtrl.Co
 // StartCoroutine(this, routine): log the iterator class when it is save related -- tells us whether the save
 // coroutine (<CoroutineSave>c__Iterator4) is ever started at the press
 extern uint64_t g_meta_buf;
+// GameObject.SetActive(this, active): log only around the save press, so the log stays readable
+static void aa_gate_setactive(const uint64_t *r) {
+    if (!getenv("DM_AALOG")) return;
+    extern uint64_t dm_guest_frame(void);
+    uint64_t f = dm_guest_frame();
+    if (f < 10150 || f > 10700) return;
+    LOG("[aa] SetActive 帧%llu go=%#llx active=%d", (unsigned long long)f, (unsigned long long)r[0], (int)(r[1] & 1));
+}
+static void aa_gate_stopcoro(const uint64_t *r) {
+    if (!getenv("DM_AALOG")) return;
+    extern uint64_t dm_guest_frame(void);
+    LOG("[aa] StopCoroutine 帧%llu this=%#llx arg=%#llx", (unsigned long long)dm_guest_frame(), (unsigned long long)r[0], (unsigned long long)r[1]);
+}
+static void aa_gate_stopall(const uint64_t *r) {
+    if (!getenv("DM_AALOG")) return;
+    extern uint64_t dm_guest_frame(void);
+    LOG("[aa] StopAllCoroutines 帧%llu this=%#llx", (unsigned long long)dm_guest_frame(), (unsigned long long)r[0]);
+}
+static module_t *aa_main_module(void) {
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return &g_mod[i];
+    return NULL;
+}
+// SaveControl.is_save_ (static fields + 6) at this instant: tells which branch the save coroutine takes
+static int aa_is_save_flag(module_t *m) {
+    if (!m) return -1;
+    uint64_t v = *(volatile uint64_t *)(m->base + 0x283eca8);
+    if (!v) return -1;
+    uint64_t klass = *(volatile uint64_t *)(uintptr_t)v;
+    if (!klass) return -1;
+    uint64_t sf = *(volatile uint64_t *)(uintptr_t)(klass + 0xa0);
+    if (!sf) return -1;
+    return *(volatile uint8_t *)(uintptr_t)(sf + 6);
+}
 static void aa_gate_corosave_next(const uint64_t *r) {
     if (!getenv("DM_AALOG")) return;
     extern uint64_t dm_guest_frame(void);
-    LOG("[aa] CoroutineSave.MoveNext 帧%llu this=%#llx state=%d", (unsigned long long)dm_guest_frame(),
-        (unsigned long long)r[0], (int)*(volatile int32_t *)(uintptr_t)(r[0] + 0x10));
+    module_t *m = aa_main_module();
+    LOG("[aa] CoroutineSave.MoveNext 帧%llu this=%#llx win=%#llx state=%d is_save=%d", (unsigned long long)dm_guest_frame(),
+        (unsigned long long)r[0], (unsigned long long)*(volatile uint64_t *)(uintptr_t)(r[0] + 0x18),
+        (int)*(volatile int32_t *)(uintptr_t)(r[0] + 0x2c), aa_is_save_flag(m));
     aa_save_gate(r);
 }
 static void aa_gate_coroanim_next(const uint64_t *r) {
@@ -73,7 +108,7 @@ static void aa_gate_startcoro(const uint64_t *r) {
     nm[i] = 0;
     if (!strstr(nm, "Save") && !strstr(nm, "save")) return;
     extern uint64_t dm_guest_frame(void);
-    LOG("[aa] StartCoroutine 帧%llu %s", (unsigned long long)dm_guest_frame(), nm);
+    LOG("[aa] StartCoroutine 帧%llu owner=%#llx %s", (unsigned long long)dm_guest_frame(), (unsigned long long)r[0], nm);
 }
 static void aa_gate_settext(const uint64_t *r) {
     if (!getenv("DM_AALOG")) return;
@@ -122,6 +157,9 @@ __attribute__((constructor)) static void aa_obs_gates(void) {
     gate_obs_set(OBS_AA_STARTCORO, aa_gate_startcoro);
     gate_obs_set(OBS_AA_COROSAVE_NEXT, aa_gate_corosave_next);
     gate_obs_set(OBS_AA_COROANIM_NEXT, aa_gate_coroanim_next);
+    gate_obs_set(OBS_AA_SETACTIVE, aa_gate_setactive);
+    gate_obs_set(OBS_AA_STOPCORO, aa_gate_stopcoro);
+    gate_obs_set(OBS_AA_STOPALL, aa_gate_stopall);
 }
 void aa_net_publish_init(void) {
     static int off = -1; if (off < 0) off = getenv("DM_NET_NOHOOK") != NULL; if (off) return;

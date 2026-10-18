@@ -190,6 +190,9 @@ OBS = {
     (0x8ee940, 39, 'f81d0ff5', 'AA：MonoBehaviour.StartCoroutine 入口（记录存档相关协程的启动）'),
     (0x334400, 40, 'd101c3ff', 'AA：<CoroutineSave>c__Iterator4.MoveNext（存档协程体）'),
     (0x334cb0, 41, 'f81d0ff5', 'AA：<CoroutineSaveAnim>c__Iterator3.MoveNext（存档动画协程体）'),
+    (0x8e5610, 42, 'f81d0ff5', 'AA：GameObject.SetActive 入口（观察存档窗口是否被停用）'),
+    (0x8eea20, 43, 'f81d0ff5', 'AA：MonoBehaviour.StopCoroutine 入口'),
+    (0x8eebe0, 44, 'd100c3ff', 'AA：MonoBehaviour.StopAllCoroutines 入口'),
   ],
   # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
   # On hardware the dispatcher thread (priority 30, core 0 only) preempts the main thread (priority 44, core 0) at once and finishes first; the host waits for the ring to empty after each post (hle_movie.c movie_ring_wait). The gates sit on the add x22, x22, #8 after the bl
