@@ -105,6 +105,28 @@ static void aa_ck_56(const uint64_t *r) { if (!getenv("DM_AALOG")) return; exter
 static void aa_ck_57(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x3346c0 帧%llu", (unsigned long long)dm_guest_frame()); }
 static void aa_ck_58(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x33478c 帧%llu", (unsigned long long)dm_guest_frame()); }
 // Log the guest frame chain (x29 walk) when a NullReferenceException is constructed during the save window
+static void aa_gate_nowval(const uint64_t *r) {
+    if (!getenv("DM_AALOG")) return;
+    extern uint64_t dm_guest_frame(void);
+    uint64_t f = dm_guest_frame();
+    if (f < 10180 || f > 10800) return;
+    LOG("[aa] Now内部：当前时间 x0=%#llx 帧%llu", (unsigned long long)r[0], (unsigned long long)f);
+}
+static void aa_gate_tzdiff(const uint64_t *r) {
+    if (!getenv("DM_AALOG")) return;
+    extern uint64_t dm_guest_frame(void);
+    uint64_t f = dm_guest_frame();
+    if (f < 10180 || f > 10800) return;
+    LOG("[aa] Now内部：GetLocalTimeDiff 后 x0=%#llx x20=%#llx x19=%#llx 帧%llu", (unsigned long long)r[0],
+        (unsigned long long)r[20], (unsigned long long)r[19], (unsigned long long)f);
+}
+static void aa_gate_box(const uint64_t *r) {
+    if (!getenv("DM_AALOG")) return;
+    extern uint64_t dm_guest_frame(void);
+    uint64_t f = dm_guest_frame();
+    if (f < 10180 || f > 10800) return;
+    LOG("[aa] Now内部：装箱后 x0=%#llx 帧%llu", (unsigned long long)r[0], (unsigned long long)f);
+}
 static void aa_gate_throw(const uint64_t *r) {
     if (!getenv("DM_AALOG")) return;
     extern uint64_t dm_guest_frame(void);
@@ -280,6 +302,9 @@ __attribute__((constructor)) static void aa_obs_gates(void) {
     gate_obs_set(OBS_AA_NRE2, aa_gate_nre);
     gate_obs_set(OBS_AA_NRE3, aa_gate_nre);
     gate_obs_set(OBS_AA_THROW, aa_gate_throw);
+    gate_obs_set(OBS_AA_TZDIFF, aa_gate_tzdiff);
+    gate_obs_set(OBS_AA_NOWVAL, aa_gate_nowval);
+    gate_obs_set(OBS_AA_BOX, aa_gate_box);
     gate_obs_set(49, aa_ck_49);
     gate_obs_set(50, aa_ck_50);
     gate_obs_set(51, aa_ck_51);
