@@ -54,6 +54,7 @@ static void aa_gate_openwin(const uint64_t *r) {
     LOG("[aa] 存档对话框打开：window=%#llx slot=%d 帧%llu", (unsigned long long)r[0], g_aa_save_slot, (unsigned long long)dm_guest_frame());
     aa_save_gate(r);
 }
+static uint64_t g_aa_release_b_at;
 // Host-side save trigger: run the game's own SaveGameDataRequest for the slot the dialog was opened for. The save UI's
 // coroutine never resumes on the host, so without this the dialog stays forever and nothing is written.
 void aa_host_save_request(void) {
@@ -68,6 +69,11 @@ void aa_host_save_request(void) {
     ((void (*)(uint64_t, uint64_t))(m->base + 0x3348e0))(0, (uint64_t)(uint32_t)slot);
     LOG("宿主触发存档：返回（应已写盘并提交）");
     busy = 0;
+    // Press B on the scripted input channel for a few frames: the game's own handler closes the save dialog (its
+    // coroutine never resumes, so it cannot close itself)
+    extern void dm_script_set(uint64_t, int32_t, int32_t, int32_t, int32_t);
+    extern uint64_t dm_guest_frame(void);
+    if (!getenv("DM_AA_NO_AUTOB")) { dm_script_set(0x2, 0, 0, 0, 0); g_aa_release_b_at = dm_guest_frame() + 4; }
     // Optional: dismiss the dialog ourselves (the save coroutine that would normally hide it never resumes)
     const char *ce = getenv("DM_AA_AUTOCLOSE");
     if (ce && atoi(ce) && g_aa_save_window) {
@@ -212,6 +218,11 @@ HLE_FORCE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", "离线：请求不在等待�
 // Probe: call the game's own C# save request from the host at a given frame (bypassing the stuck save menu), to tell
 // "the menu never calls it" apart from "the save code itself is broken". DM_AA_CALL_SAVE=<frame>:<slot>
 void aa_call_save_probe(void) {
+    if (g_aa_release_b_at) {
+        extern void dm_script_set(uint64_t, int32_t, int32_t, int32_t, int32_t);
+        extern uint64_t dm_guest_frame(void);
+        if (dm_guest_frame() >= g_aa_release_b_at) { dm_script_set(0, 0, 0, 0, 0); g_aa_release_b_at = 0; }
+    }
     static int done, autosave_frames = -2; static uint64_t opened_at;
     // DM_AA_AUTOSAVE=<frames after the dialog opens>; unset = on with the default 20 frames for this build (the save
     // UI's coroutine never resumes on the host, so the game's own SaveGameDataRequest is called by the host instead),

@@ -32,6 +32,10 @@ void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry
     uint64_t old = atomic_exchange(&g_pad_btn, buttons); atomic_fetch_or(&g_pad_latch, buttons & ~old); atomic_store(&g_pad_axes, pack(lx, ly, rx, ry));
 }
 // Scripted input (DM_KEYS) keeps its own accumulator: the front end polls the physical pad every 1/120 s and overwrites its own state, which would clear a scripted press before the game ever samples it.
+static void script_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);
+// Host-side synthetic press on the scripted input channel (separate from the physical pad, so the front end's
+// per-frame polling cannot overwrite it). Used to let the game's own handler close the stuck save dialog.
+void dm_script_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) { script_set(buttons, lx, ly, rx, ry); }
 static void script_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     uint64_t old = atomic_exchange(&g_s_btn, buttons); atomic_fetch_or(&g_s_latch, buttons & ~old); atomic_store(&g_s_axes, pack(lx, ly, rx, ry));
 }
