@@ -194,7 +194,7 @@ static void register_gates(module_t *m, const char *dir) {
     if (f) {
         unsigned long ret, orig; char kind[16]; int arg;
         while (fgets(line, sizeof line, f))
-            if (sscanf(line, "%lx %15s %d %lx", &ret, kind, &arg, &orig) == 4) { gate_register((uint64_t)m->base + ret, kind, arg, orig); ng++; }
+            if (sscanf(line, "%lx %15s %d %lx", &ret, kind, &arg, &orig) == 4) { gate_register((uint64_t)m->base + ret, kind, arg, (uint64_t)m->base + orig); ng++; }
         fclose(f);
     }
     LOG("%s: gates %d patch_off %#llx keys %lu/%lu/%lu/%lu", m->name, ng, m->patch_off, g_key18, g_keytls, g_keytlr, g_keygate);

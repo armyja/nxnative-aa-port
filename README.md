@@ -1,5 +1,8 @@
 # nxnative
 
+> **This fork**: Ace Attorney 123 save/load fix, XCI extraction support, and bring-up notes.
+> See [FORK-NOTES.md](FORK-NOTES.md). No game files, keys or extracted data are included here.
+
 [中文说明](#中文说明)
 
 Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game (its NSP files) and your `prod.keys`; one script turns them into an IPA that you sideload.

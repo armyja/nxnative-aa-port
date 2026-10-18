@@ -81,6 +81,10 @@ HLE_FORCE("_ZN2nn2oe16GetOperationModeEv", "运行模式查询；按 DM_OPMODE �
 HLE_FORCE("_ZN2nn2oe18GetPerformanceModeEv", "性能模式查询；与运行模式一致", int, h_oe_GetPerfMode, void) { return opmode(); }
 // apm performance configurations: Normal 0x00010000 (CPU 1020 / GPU 384 / EMC 1600 MHz, the handheld default), Boost 0x00010001 (GPU 768 MHz, the docked default)
 HLE_FORCE("_ZN2nn2oe27GetPerformanceConfigurationENS0_15PerformanceModeE", "查 CPU/GPU 频率档（经 apm）；按模式报缺省档", int, h_oe_GetPerfCfg, int mode) { return mode == 1 ? 0x00010001 : 0x00010000; }
+// CPU overclock query (a dev-unit feature; retail reports false). The SDK path goes through nn::apm, whose client is created by apm::Initialize —
+// which normally runs from oe::Initialize, a host no-op. Without the hook the SDK dereferences that null client: RE Engine calls it while
+// building its root object (main+0x2c360b4 → sdk+0x1c2ba0), the query lands at sdk+0x1c2bcc with x19 = 0 and SIGSEGVs at address 0.
+HLE_FORCE("_ZN2nn2oe21IsCpuOverclockEnabledEv", "CPU 超频查询（零售机没有）；报否", unsigned, h_oe_Overclock, void) { return 0; }
 HLE_FORCE("_ZN2nn2oe24SetAlbumImageOrientationENS_5album16ImageOrientationE", "截图方向（经 am）；宿主无系统截图", void, h_oe_AlbumOrient, int o) { (void)o; }
 HLE_FORCE("_ZN2nn2oe27SetPerformanceConfigurationENS0_15PerformanceModeEi", "设 CPU/GPU 频率档；宿主不调频", void, h_oe_SetPerfCfg, int mode, int cfg) {
     LOG("oe::SetPerformanceConfiguration mode=%d cfg=%#x（忽略）", mode, cfg);
@@ -219,6 +223,21 @@ static void scale3d_tick(void) {
     cur = want; atomic_store(&g_scale3d_cur, want);
     LOG("3D 渲染比例 %.2f：3D 目标 %ux%u，输出 %ux%u（帧 %llu）", want, *(uint32_t *)(renderer + 0xee78), *(uint32_t *)(renderer + 0xee7c),
         *(uint32_t *)(renderer + 0xee88), *(uint32_t *)(renderer + 0xee8c), (unsigned long long)dm_nvn_frame_count());
+}
+// The notification message event, the object RE Engine puts into a MultiWait (main+0x2c36a44 calls the getter, then InitializeMultiWaitHolder). On the device
+// oe::Initialize creates it; the host's oe::Initialize is a no-op, so the SDK global it points at stays all zero, and InitializeMultiWaitHolder aborts when the
+// type byte at +0x28 is neither 1 (local event) nor 2 (inter-process event). Build it with the SDK's own CreateSystemEvent so the internal layout is right,
+// and hand the game the same object every time. The host does not signal it (notifications are fetched with TryPop each pass); a wait on it simply does not wake.
+HLE_FORCE("_ZN2nn2oe27GetNotificationMessageEventEv", "系统通知事件；用 SDK 的 CreateSystemEvent 自建（宿主 oe::Initialize 是空操作）", void *, h_oe_NotifEvent, void) {
+    static _Alignas(16) uint8_t ev[0x80];
+    if (!ev[0x28]) {
+        typedef unsigned (*create_t)(void *, int, unsigned);
+        create_t c = (create_t)guest_sym("_ZN2nn2os17CreateSystemEventEPNS0_15SystemEventTypeENS0_14EventClearModeEb");
+        if (!c) die("缺 SDK 符号 nn::os::CreateSystemEvent");
+        unsigned rc = c(ev, 1 /* ManualClear */, 0);
+        if (rc) die("CreateSystemEvent 失败 %#x", rc);
+    }
+    return ev;
 }
 HLE_FORCE("_ZN2nn2oe25TryPopNotificationMessageEPj", "系统通知队列；前端状态变化入队", unsigned, h_oe_TryPopMsg, uint32_t *msg) {
     scale3d_tick();

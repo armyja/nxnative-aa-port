@@ -180,7 +180,7 @@ CUTS = {
 # ---- Registered observation gates: {NSO build ID: [(offset, number, original instruction word, reason)]}. Numbers match OBS_* in the host's hle.h;
 # the original instruction must be position independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns ----
 OBS = {
-  # Ace Attorney 123 Trilogy (0100CB000A142000 v196608): message setter entry; the save dialog's "正在存档" text
+  # Ace Attorney 123 Trilogy (0100CB000A142000 v196608): message setter entry; the save dialog's "saving in progress" text (text id 0x0b)
   # is message 0x0b in Data/StreamingAssets/menu/text/save_text_s.bin -- logging the callers tells us which C#
   # path starts a save (the save never reaches fs on the host, so we need the caller, not the file system)
   'c5b5d28842207c47bd0fc97137e5e75f': [
@@ -201,7 +201,7 @@ OBS = {
     (0x337c30, 32, 'a9be4ff4', 'AA：SaveLoadUICtrl.SaveConfirmation 入口（按 A 确认存档槽）'),
     (0x333c80, 33, 'a9be4ff4', 'AA：SaveConfirmationWindow.CoroutineSave 入口（真正发起存档的协程）'),
     (0x333b70, 34, 'a9be4ff4', 'AA：SaveConfirmationWindow.CoroutineSaveAnim 入口'),
-    (0x333540, 35, 'f81c0ff7', 'AA：SaveConfirmationWindow.OpenWindow 入口（弹出正在存档对话框）'),
+    (0x333540, 35, 'f81c0ff7', 'AA: SaveConfirmationWindow.OpenWindow entry (opens the saving dialog)'),
     (0x333ae0, 36, 'f81d0ff5', 'AA：SaveConfirmationWindow.LoadingPlay 入口'),
     (0x333be0, 37, 'a9be4ff4', 'AA：SaveConfirmationWindow.LoadingWait 入口'),
     (0x338280, 38, 'a9be4ff4', 'AA：SaveLoadUICtrl.CoroutineSaveLoad 入口'),

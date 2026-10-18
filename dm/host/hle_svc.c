@@ -138,6 +138,8 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
     }
     case 0x06: {  // QueryMemory(MemoryInfo* out, PageInfo* pout, addr) → x1 = pageinfo
         uint64_t mi = regs[0], addr = regs[2];
+        if (getenv("DM_QMLOG")) { static int n; if (n++ < 40) { void *p = (void *)(uintptr_t)orig_addr; module_t *mm = module_of(p);
+            LOG("QueryMemory %#llx 调用点 %s+%#llx", (unsigned long long)addr, mm ? mm->name : "?", mm ? (unsigned long long)(orig_addr - (uint64_t)mm->base) : 0); } }
         // MemoryInfo: base(0) size(8) state(0x10) attr(0x14) perm(0x18) ...
         uint8_t *a = (uint8_t *)addr;
         uint64_t base, size, state, perm;
@@ -204,9 +206,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
     }
     case 0x26: {  // Break(reason, ptr, size): SDK fatal abort
         uint32_t res = (regs[1] && regs[2] >= 4) ? *(uint32_t *)regs[1] : 0;
-        module_t *mm = module_of((void *)regs[30]);
+        module_t *mm = module_of((void *)orig_addr);
         static int nb;
-        LOG("Break#%d reason=%#llx Result=%#x svc 位于 %s+%#llx", ++nb, regs[0], res, mm ? mm->name : "?", orig_addr);
+        LOG("Break#%d reason=%#llx Result=%#x svc 位于 %s+%#llx", ++nb, regs[0], res, mm ? mm->name : "?", mm ? orig_addr - (uint64_t)mm->base : orig_addr);
         dm_backtrace(regs[29]);
         if (regs[0] & 0x80000000ull) return 0;   // notification only, can continue
         _exit(42);
@@ -226,7 +228,13 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = RESERVE;     break;
         case I_StackAddr: v = (uint64_t)g_stack; break;   case I_StackSize: v = g_stack_cap; break;
         case I_TotalMem: case I_TotalNonSys: v = APP_POOL; break;
-        case I_UsedMem:  case I_UsedNonSys:  v = g_heap_cur + 0x4000000 + big_bss_bytes(); break;
+        case I_UsedMem: v = g_heap_cur + 0x4000000 + big_bss_bytes(); break;
+        // Non-system memory: the heap plus the whole module footprint (file-backed text/ro/data and bss). A title can size its own heap as
+        // "total non-system − used non-system" and not retry on failure, so the footprint must be in here: RE Engine asks for 0xc9200000,
+        // which with the aligned image footprint (0xbe00000) exceeds the 0xcd500000 pool, SetHeapSize answers 0x10801, the following
+        // AllocateMemoryBlock(8 MB) finds an empty heap (0x1003), and nn::mem::StandardAllocator::Initialize(NULL, …) aborts
+        // (Apollo Justice at nninitStartup, main+0x2bff730 → sdk+0x11ff34). The 64 MB in UsedMem stays as it is: other titles read that id.
+        case I_UsedNonSys: v = g_heap_cur + image_bytes(); break;
         case I_SysResTotal: v = 0x2000000; break; case I_SysResUsed: v = 0x400000; break;
         case I_DebuggerAttached: v = 0; break;
         case I_RandomEntropy: { uint64_t dm_entropy64(void); v = dm_entropy64(); break; }   // a deterministic stream when DM_DETCLOCK is on (hle_os.c)
