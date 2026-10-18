@@ -14,10 +14,65 @@ static void aa_save_msg_gate(const uint64_t *regs) {
     // the first frame's [x29 + 8] (patch_nso's convention), and the x29 chain gives the callers above it
     uint64_t fp = regs[29], chain[8] = {0}; int n = 0;
     for (int i = 0; i < 8 && fp >= 0x1000; i++) { uint64_t nxt = *(volatile uint64_t *)fp, ret = *(volatile uint64_t *)(fp + 8); chain[n++] = ret; if (nxt <= fp) break; fp = nxt; }
-    LOG("[aa] 消息设置 id=%#llx caller=%#llx 链=%#llx,%#llx,%#llx,%#llx,%#llx", (unsigned long long)regs[1],
+    extern uint64_t dm_guest_frame(void);
+    LOG("[aa] 消息设置 帧%llu id=%#llx caller=%#llx 链=%#llx,%#llx,%#llx,%#llx,%#llx", (unsigned long long)dm_guest_frame(), (unsigned long long)regs[1],
         (unsigned long long)chain[0], (unsigned long long)chain[0], (unsigned long long)chain[1], (unsigned long long)chain[2], (unsigned long long)chain[3], (unsigned long long)chain[4]);
 }
-__attribute__((constructor)) static void aa_obs_gates(void) { gate_obs_set(OBS_AA_SAVE_MSG, aa_save_msg_gate); }
+static void aa_save_gate(const uint64_t *regs) {
+    if (!getenv("DM_AALOG")) return;
+    uint64_t fp = regs[29], chain[8] = {0}; int n = 0;
+    for (int i = 0; i < 8 && fp >= 0x1000; i++) { uint64_t nxt = *(volatile uint64_t *)fp, ret = *(volatile uint64_t *)(fp + 8); chain[n++] = ret; if (nxt <= fp) break; fp = nxt; }
+    LOG("[aa] 存档方法 id=%#llx x0=%#llx x1=%#llx x2=%#llx caller=%#llx 链=%#llx,%#llx,%#llx", (unsigned long long)regs[1] /*unused*/,
+        (unsigned long long)regs[0], (unsigned long long)regs[1], (unsigned long long)regs[2],
+        (unsigned long long)chain[0], (unsigned long long)chain[0], (unsigned long long)chain[1], (unsigned long long)chain[2]);
+}
+static void aa_gate_save_game_req(const uint64_t *r) { LOG("[aa] SaveGameDataRequest"); aa_save_gate(r); }
+static void aa_gate_save_sys_req(const uint64_t *r)  { LOG("[aa] SaveSystemDataRequest"); aa_save_gate(r); }
+static void aa_gate_save_create_req(const uint64_t *r) { LOG("[aa] SaveCreateSystemDataRequest"); aa_save_gate(r); }
+static void aa_gate_save(const uint64_t *r) { LOG("[aa] Save"); aa_save_gate(r); }
+static void aa_gate_ondece(const uint64_t *r) { LOG("[aa] OnDecide"); aa_save_gate(r); }
+static void aa_gate_msgset(const uint64_t *r) { LOG("[aa] Mess_window_set"); aa_save_gate(r); }
+// Text.set_text(this, value): the value is an Il2CppString (length at +0x10, UTF-16 chars at +0x14). Only log strings
+// that contain 存档 / 保存 / 电源 -- the save dialog's text -- so the log stays small.
+static void aa_gate_save_game2(const uint64_t *r) { LOG("[aa] SaveGameData(真)"); aa_save_gate(r); }
+static void aa_gate_tempdata(const uint64_t *r) { LOG("[aa] tempDataGet"); aa_save_gate(r); }
+static void aa_gate_settext(const uint64_t *r) {
+    if (!getenv("DM_AALOG")) return;
+    const volatile uint8_t *sp = (const volatile uint8_t *)(uintptr_t)r[1];
+    if (!sp) return;
+    int32_t len = *(const volatile int32_t *)(sp + 0x10);
+    if (len <= 0 || len > 400) return;
+    const uint16_t *ch = (const uint16_t *)(sp + 0x14);
+    int hit = 0; char utf8[256]; int n = 0;
+    for (int i = 0; i < len; i++) {
+        uint16_t c = ch[i];
+        if (c == 0x5B58 || c == 0x4FDD) hit = 1;         // 存 / 保
+        if (n < (int)sizeof utf8 - 4) {
+            if (c < 0x80) utf8[n++] = (char)c;
+            else if (c < 0x800) { utf8[n++] = (char)(0xC0 | (c >> 6)); utf8[n++] = (char)(0x80 | (c & 0x3F)); }
+            else { utf8[n++] = (char)(0xE0 | (c >> 12)); utf8[n++] = (char)(0x80 | ((c >> 6) & 0x3F)); utf8[n++] = (char)(0x80 | (c & 0x3F)); }
+        }
+    }
+    if (!hit) return;
+    utf8[n] = 0;
+    uint64_t fp = r[29], chain[6] = {0};
+    for (int i = 0; i < 6 && fp >= 0x1000; i++) { uint64_t nxt = *(volatile uint64_t *)fp, ret = *(volatile uint64_t *)(fp + 8); chain[i] = ret; if (nxt <= fp) break; fp = nxt; }
+    extern uint64_t dm_guest_frame(void);
+    LOG("[aa] set_text 帧%llu \"%s\" 调用者=%#llx 链=%#llx,%#llx,%#llx", (unsigned long long)dm_guest_frame(), utf8,
+        (unsigned long long)chain[0], (unsigned long long)chain[0], (unsigned long long)chain[1], (unsigned long long)chain[2]);
+}
+__attribute__((constructor)) static void aa_obs_gates(void) {
+    gate_obs_set(OBS_AA_SAVE_MSG, aa_save_msg_gate);
+    gate_obs_set(OBS_AA_SAVE_GAME_REQ, aa_gate_save_game_req);
+    gate_obs_set(OBS_AA_SAVE_SYS_REQ, aa_gate_save_sys_req);
+    gate_obs_set(OBS_AA_SAVE_CREATE_REQ, aa_gate_save_create_req);
+    gate_obs_set(OBS_AA_SAVE, aa_gate_save);
+    gate_obs_set(OBS_AA_ONDECIDE, aa_gate_ondece);
+    gate_obs_set(OBS_AA_MSGSET, aa_gate_msgset);
+    gate_obs_set(OBS_AA_SETTEXT, aa_gate_settext);
+    gate_obs_set(OBS_AA_SAVE_GAME2, aa_gate_save_game2);
+    gate_obs_set(OBS_AA_TEMPDATA, aa_gate_tempdata);
+}
 void aa_net_publish_init(void) {
     static int off = -1; if (off < 0) off = getenv("DM_NET_NOHOOK") != NULL; if (off) return;
     static int done;
