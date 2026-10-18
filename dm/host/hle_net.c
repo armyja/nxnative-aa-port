@@ -105,6 +105,16 @@ static void aa_ck_56(const uint64_t *r) { if (!getenv("DM_AALOG")) return; exter
 static void aa_ck_57(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x3346c0 帧%llu", (unsigned long long)dm_guest_frame()); }
 static void aa_ck_58(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x33478c 帧%llu", (unsigned long long)dm_guest_frame()); }
 // Log the guest frame chain (x29 walk) when a NullReferenceException is constructed during the save window
+// The guest's DateTime.Now returns 0 (the port has no working time service), which makes every save slot show
+// 0001/01/01. The gate stub saves and restores x0..x30, so we can substitute a real DateTime here: the coroutine
+// stores x0/x1 into the slot right after this point.
+static void aa_gate_nowinject(const uint64_t *r) {
+    uint64_t *regs = (uint64_t *)(uintptr_t)r;
+    time_t now = time(NULL);
+    if (now <= 0) return;
+    regs[0] = (uint64_t)((int64_t)now + 62135596800LL) * 10000000ULL;   // DateTime ticks (100ns since 0001-01-01)
+    regs[1] = 0;                                                        // kind = Unspecified
+}
 static void aa_gate_nowval(const uint64_t *r) {
     if (!getenv("DM_AALOG")) return;
     extern uint64_t dm_guest_frame(void);
@@ -304,6 +314,7 @@ __attribute__((constructor)) static void aa_obs_gates(void) {
     gate_obs_set(OBS_AA_THROW, aa_gate_throw);
     gate_obs_set(OBS_AA_TZDIFF, aa_gate_tzdiff);
     gate_obs_set(OBS_AA_NOWVAL, aa_gate_nowval);
+    gate_obs_set(OBS_AA_NOWINJECT, aa_gate_nowinject);
     gate_obs_set(OBS_AA_BOX, aa_gate_box);
     gate_obs_set(49, aa_ck_49);
     gate_obs_set(50, aa_ck_50);

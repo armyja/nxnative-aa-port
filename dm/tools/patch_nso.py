@@ -217,7 +217,6 @@ OBS = {
     (0x334494, 50, '3900c2d5', 'AA 检查点：0x334494 类初始化末尾'),
     (0x3344b4, 51, 'aa1403e0', 'AA 检查点：0x3344b4 动画迭代器构造后'),
     (0x334570, 52, '2a1f03e0', 'AA 检查点：0x334570 状态判定末尾'),
-    (0x3345ec, 53, 'a9000680', 'AA 检查点：0x3345ec 取时间后'),
     (0x334600, 54, 'aa0003f4', 'AA 检查点：0x334600 格式化后'),
     (0x334648, 55, 'aa1f03e1', 'AA 检查点：0x334648 保存准备1'),
     (0x334684, 56, 'aa1f03e1', 'AA 检查点：0x334684 保存准备2'),
@@ -234,6 +233,7 @@ OBS = {
     (0x961068, 65, 'a9404ff4', 'AA：DateTime.Now 内 GetLocalTimeDiff 之后（时区差）'),
     (0x961094, 66, 'aa0003f6', 'AA：DateTime.Now 内装箱 TimeSpan 之后（x0=装箱结果）'),
     (0x960fec, 67, 'aa0003f5', 'AA：DateTime.Now 内取当前时间之后（x0=时间值）'),
+    (0x3345ec, 68, 'a9000680', 'AA：存档协程 DateTime.Now 结果 → 注入宿主真实时间（修正存档日期）'),
   ],
   # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
   # On hardware the dispatcher thread (priority 30, core 0 only) preempts the main thread (priority 44, core 0) at once and finishes first; the host waits for the ring to empty after each post (hle_movie.c movie_ring_wait). The gates sit on the add x22, x22, #8 after the bl

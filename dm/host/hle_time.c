@@ -40,7 +40,18 @@ HLE_FORCE("time", "按返回点认出建局种子那一处（DM_FIXED_TIME）；
     return sdk_time(t);
 }
 
-HLE_FORCE("_ZN2nn4time10InitializeEv", "连 time 服务；时钟改取宿主系统时间", Result, h_time_Initialize, void) { return RES_OK; }
+HLE_FORCE("_ZN2nn4time10InitializeEv", "连 time 服务；默认直接 OK（宿主接管时钟），DM_TIME_REALINIT=1 时转调 SDK 真实初始化", Result, h_time_Initialize, void) {
+    if (!getenv("DM_TIME_REALINIT")) return RES_OK;
+    // .NET（DateTime.Now）走的是 SDK 内部的时间服务对象，它只在真实 Initialize 里被创建；
+    // 我们直接返回 OK 会让那个对象一直为 null → guest 时钟恒为 0 → 存档日期显示 0001/01/01。
+    static Result (*real)(void);
+    if (!real) {
+        module_t *ms = NULL;
+        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "sdk")) ms = &g_mod[i];
+        if (ms) real = (Result (*)(void))module_sym(ms, "_ZN2nn4time10InitializeEv");
+    }
+    return real ? real() : RES_OK;
+}
 HLE_FORCE("_ZN2nn4time13IsInitializedEv", "time 服务已被接管，恒为已初始化", int, h_time_IsInitialized, void) { return 1; }
 // Steady clock (seconds since boot + a clock source ID, a 16-byte UUID): the host's monotonic seconds with a fixed source ID. GetSpanBetween runs as is in sdk: it subtracts only when the source IDs match
 HLE_FORCE("_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyClockTimePointE", "稳定时钟 → 宿主单调时钟（秒），源号固定", Result, h_time_SteadyNow, uint8_t *out) {
