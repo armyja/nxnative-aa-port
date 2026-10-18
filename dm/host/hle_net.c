@@ -104,6 +104,13 @@ static void aa_ck_55(const uint64_t *r) { if (!getenv("DM_AALOG")) return; exter
 static void aa_ck_56(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x334684 帧%llu", (unsigned long long)dm_guest_frame()); }
 static void aa_ck_57(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x3346c0 帧%llu", (unsigned long long)dm_guest_frame()); }
 static void aa_ck_58(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x33478c 帧%llu", (unsigned long long)dm_guest_frame()); }
+static void aa_gate_gettime(const uint64_t *r) {
+    if (!getenv("DM_AALOG")) return;
+    extern uint64_t dm_guest_frame(void);
+    uint64_t f = dm_guest_frame();
+    if (f < 10180 || f > 10800) return;
+    LOG("[aa] Time::get_time 帧%llu", (unsigned long long)f);
+}
 static void aa_gate_clinit(const uint64_t *r) {
     if (!getenv("DM_AALOG")) return;
     extern uint64_t dm_guest_frame(void); extern uint64_t g_meta_buf;
@@ -239,6 +246,7 @@ __attribute__((constructor)) static void aa_obs_gates(void) {
     gate_obs_set(OBS_AA_SAVE_P2, aa_gate_p2);
     gate_obs_set(OBS_AA_SAVE_P3, aa_gate_p3);
     gate_obs_set(OBS_AA_CLINIT, aa_gate_clinit);
+    gate_obs_set(OBS_AA_GETTIME, aa_gate_gettime);
     gate_obs_set(49, aa_ck_49);
     gate_obs_set(50, aa_ck_50);
     gate_obs_set(51, aa_ck_51);

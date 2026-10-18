@@ -206,6 +206,7 @@ OBS = {
     (0x3346c0, 57, 'aa1f03e1', 'AA 检查点：0x3346c0 保存准备3'),
     (0x33478c, 58, '2a1403e1', 'AA 检查点：0x33478c 调用存档请求前'),
     (0xdc9ee0, 59, 'd101c3ff', 'AA：il2cpp 类初始化入口（记录存档过程中初始化的类）'),
+    (0xd5d220, 60, 'f81e0ff3', 'AA：UnityEngine.Time::get_time icall 入口（协程首跑时调用）'),
   ],
   # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
   # On hardware the dispatcher thread (priority 30, core 0 only) preempts the main thread (priority 44, core 0) at once and finishes first; the host waits for the ring to empty after each post (hle_movie.c movie_ring_wait). The gates sit on the add x22, x22, #8 after the bl
