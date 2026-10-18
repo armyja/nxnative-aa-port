@@ -732,7 +732,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         pthread_mutex_lock(&G); uint32_t hw = h_new(O_EVENT_W, e), hr = h_new(O_EVENT_R, e); pthread_mutex_unlock(&G);
         {   // DM_CVLOG=<frame>: kernel events (CreateEvent / SignalEvent / ClearEvent / ResetSignal) and single-object event waits, so an event that is waited on but never signalled can be found offline
             int m = cvlog_min();
-            if (m >= 0 && dm_guest_frame() >= (uint64_t)m) LOG("[ev] 建 写 %#x 读 %#x 对象 %p lr=%#llx", hw, hr, (void *)e, cur() ? cur()->last_lr : 0);
+            if (m >= 0 && dm_guest_frame() >= (uint64_t)m) LOG("[ev] 建 写 %#x 读 %#x 对象 %p 线程 %#x lr=%#llx", hw, hr, (void *)e, cur() ? cur()->handle : 0, cur() ? cur()->last_lr : 0);
         }
         regs[0] = 0; regs[1] = hw; regs[2] = hr; return 1;
     }
@@ -751,8 +751,8 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         pthread_mutex_unlock(&G);
         {   // DM_CVLOG: event signal / clear / reset (see the CreateEvent log above)
             int m = cvlog_min();
-            if (m >= 0 && dm_guest_frame() >= (uint64_t)m) LOG("[ev] %s 句柄 %#x 对象 %p 已置位 %d lr=%#llx",
-                num == 0x11 ? "信" : num == 0x17 ? "复位" : "清", h, (void *)e, e ? e->signaled : -1, cur() ? cur()->last_lr : 0);
+            if (m >= 0 && dm_guest_frame() >= (uint64_t)m) LOG("[ev] %s 句柄 %#x 对象 %p 已置位 %d 线程 %#x lr=%#llx",
+                num == 0x11 ? "信" : num == 0x17 ? "复位" : "清", h, (void *)e, e ? e->signaled : -1, cur() ? cur()->handle : 0, cur() ? cur()->last_lr : 0);
         }
         regs[0] = (uint64_t)r; return 1;
     }
@@ -762,7 +762,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             int m = cvlog_min();
             if (m >= 0 && n == 1 && dm_guest_frame() >= (uint64_t)m) {
                 event_t *e = h_peek(hs[0], O_EVENT_R) ? h_peek(hs[0], O_EVENT_R) : h_peek(hs[0], O_EVENT_W);
-                if (e) LOG("[ev] 等 句柄 %#x 对象 %p 已置位 %d 超时 %lld lr=%#llx", hs[0], (void *)e, e->signaled, ns, t ? t->last_lr : 0);
+                if (e) LOG("[ev] 等 句柄 %#x 对象 %p 已置位 %d 超时 %lld 线程 %#x lr=%#llx", hs[0], (void *)e, e->signaled, ns, t ? t->handle : 0, t ? t->last_lr : 0);
             }
         }
         int64_t deadline = ns > 0 ? (dm_detclock_enabled() ? (int64_t)guest_ns() : now_mono_ns()) + ns : 0;
