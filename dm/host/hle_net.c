@@ -105,6 +105,20 @@ static void aa_ck_56(const uint64_t *r) { if (!getenv("DM_AALOG")) return; exter
 static void aa_ck_57(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x3346c0 帧%llu", (unsigned long long)dm_guest_frame()); }
 static void aa_ck_58(const uint64_t *r) { if (!getenv("DM_AALOG")) return; extern uint64_t dm_guest_frame(void); LOG("[aa] 检查点0x33478c 帧%llu", (unsigned long long)dm_guest_frame()); }
 // Log the guest frame chain (x29 walk) when a NullReferenceException is constructed during the save window
+static void aa_gate_throw(const uint64_t *r) {
+    if (!getenv("DM_AALOG")) return;
+    extern uint64_t dm_guest_frame(void);
+    uint64_t f = dm_guest_frame();
+    if (f < 10180 || f > 10800) return;
+    uint64_t fp = r[29], chain[8] = {0};
+    for (int i = 0; i < 8 && fp >= 0x1000; i++) {
+        uint64_t nxt = *(volatile uint64_t *)(uintptr_t)fp, ret = *(volatile uint64_t *)(uintptr_t)(fp + 8);
+        chain[i] = ret; if (nxt <= fp) break; fp = nxt;
+    }
+    LOG("[aa] 空引用抛出 帧%llu x0=%#llx 链=%#llx,%#llx,%#llx,%#llx,%#llx,%#llx", (unsigned long long)f,
+        (unsigned long long)r[0], (unsigned long long)chain[0], (unsigned long long)chain[1], (unsigned long long)chain[2],
+        (unsigned long long)chain[3], (unsigned long long)chain[4], (unsigned long long)chain[5]);
+}
 static void aa_gate_nre(const uint64_t *r) {
     if (!getenv("DM_AALOG")) return;
     extern uint64_t dm_guest_frame(void);
@@ -265,6 +279,7 @@ __attribute__((constructor)) static void aa_obs_gates(void) {
     gate_obs_set(OBS_AA_NRE1, aa_gate_nre);
     gate_obs_set(OBS_AA_NRE2, aa_gate_nre);
     gate_obs_set(OBS_AA_NRE3, aa_gate_nre);
+    gate_obs_set(OBS_AA_THROW, aa_gate_throw);
     gate_obs_set(49, aa_ck_49);
     gate_obs_set(50, aa_ck_50);
     gate_obs_set(51, aa_ck_51);
