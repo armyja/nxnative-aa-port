@@ -15,6 +15,7 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <time.h>
+#include <unistd.h>
 #include <mach/mach.h>
 #include <pthread/qos.h>
 #include <dlfcn.h>
@@ -385,6 +386,43 @@ int thr_find_by_name(const char *name, pthread_t *out) {
 }
 // State dump (called from crash.c on watchdog / crash; read-only, takes no lock): what each guest thread is waiting on and where its most recent SVC was issued from
 // During a state dump, take the backtrace of other guest threads: suspend → read registers → walk the frame pointer chain (both guest code and gate blocks keep the x29 chain) → resume; only main / sdk frames are printed
+// DM_GUEST_SAMPLE=<handle>:<ms>:<n> -- sample that guest thread's PC n times (default every 10 ms) and print a
+// histogram of the hot addresses; for "the game loops here but makes no progress" cases (guest code only, no symbols).
+static void *guest_sampler_main(void *arg) {
+    uint64_t v = (uint64_t)arg; uint32_t h = (uint32_t)((v >> 32) & 0xffff); int ms = (int)((v >> 16) & 0xffff), n = (int)(v & 0xffff); int delay = (int)((v >> 48) & 0xffff);
+    if (delay) sleep((unsigned)delay);
+    if (!ms) ms = 10; if (!n) n = 300;
+    typedef struct { uint64_t pc; int c; } spot;
+    static spot top[64]; int ntop = 0;
+    thr_t *t = NULL;
+    pthread_mutex_lock(&G); for (thr_t *q = g_all; q; q = q->all) if (q->handle == h) t = q; pthread_mutex_unlock(&G);
+    if (!t) { LOG("DM_GUEST_SAMPLE：没有线程 %#x", h); return NULL; }
+    for (int i = 0; i < n; i++) {
+        usleep((useconds_t)ms * 1000);
+        if (thread_suspend(t->mport) != KERN_SUCCESS) continue;
+        arm_thread_state64_t st; mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+        uint64_t pc = 0;
+        if (thread_get_state(t->mport, ARM_THREAD_STATE64, (thread_state_t)&st, &cnt) == KERN_SUCCESS) pc = __darwin_arm_thread_state64_get_pc(st);
+        thread_resume(t->mport);
+        if (!pc) continue;
+        int k = -1; for (int j = 0; j < ntop; j++) if (top[j].pc == pc) { k = j; break; }
+        if (k < 0) { if (ntop < 64) { k = ntop++; top[k].pc = pc; top[k].c = 0; } else continue; }
+        top[k].c++;
+    }
+    LOG("DM_GUEST_SAMPLE 线程 %#x 采样 %d 次，热点：", h, n);
+    for (int a = 0; a < ntop && a < 12; a++) {
+        int best = -1; for (int j = 0; j < ntop; j++) if (top[j].c && (best < 0 || top[j].c > top[best].c)) best = j;
+        if (best < 0) break;
+        module_t *m = module_of((void *)top[best].pc);
+        LOG("   %5d 次  %s+%#llx", top[best].c, m ? m->name : "?", m ? top[best].pc - (uint64_t)m->base : top[best].pc);
+        top[best].c = 0;
+    }
+    return NULL;
+}
+void dm_guest_sample_start(unsigned h, unsigned ms, unsigned n, unsigned delay_s) {
+    pthread_t th; uint64_t v = ((uint64_t)h << 32) | ((uint64_t)(ms & 0xffff) << 16) | (n & 0xffff) | ((uint64_t)(delay_s & 0xffff) << 48);
+    if (!pthread_create(&th, NULL, guest_sampler_main, (void *)v)) pthread_detach(th);
+}
 static void thr_bt(thr_t *t) {
     if (!t->mport || t->exited || t->mport == mach_thread_self()) return;
     if (thread_suspend(t->mport) != KERN_SUCCESS) return;

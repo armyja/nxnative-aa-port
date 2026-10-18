@@ -41,6 +41,9 @@ struct dm_flags g_flag;
 uint64_t g_t0_ns;
 static void flags_init(void) {
     g_flag.thr = !!getenv("DM_THR"); g_flag.svc = !!getenv("DM_SVC"); g_flag.fs = !!getenv("DM_FS");
+    { const char *e = getenv("DM_GUEST_SAMPLE");   // <handle>:<ms>:<n>: sample a guest thread's PC and print the hot addresses
+      if (e) { unsigned h=0, ms=10, n=300, dl=0; sscanf(e, "%x:%u:%u:%u", &h, &ms, &n, &dl); extern void dm_guest_sample_start(unsigned, unsigned, unsigned, unsigned); dm_guest_sample_start(h, ms, n, dl); } }
+
     g_flag.movie = !!getenv("DM_MOVIE"); g_flag.dbg = !!getenv("DM_DBG"); g_flag.imports = !!getenv("DM_IMPORTS");
     g_flag.bootprof = !!getenv("DM_BOOTPROF");
 }
