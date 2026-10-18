@@ -10,6 +10,7 @@
 // Semantics follow the public Horizon kernel behavior (KConditionVariable / KAddressArbiter / KSynchronization of Atmosphère mesosphère).
 // All waits hang on one global lock G, with one condition variable per thread; correctness first, performance to be measured later.
 #include "dm.h"
+uint64_t dm_guest_frame(void);
 #include <errno.h>
 #include <sched.h>
 #include <signal.h>
@@ -391,6 +392,7 @@ int thr_find_by_name(const char *name, pthread_t *out) {
 static void *guest_sampler_main(void *arg) {
     uint64_t v = (uint64_t)arg; uint32_t h = (uint32_t)((v >> 32) & 0xffff); int ms = (int)((v >> 16) & 0xffff), n = (int)(v & 0xffff); int delay = (int)((v >> 48) & 0xffff);
     if (delay) sleep((unsigned)delay);
+    extern uint64_t g_samp_frame; if (g_samp_frame) { while (dm_guest_frame() < g_samp_frame) usleep(2000); }
     if (!ms) ms = 10; if (!n) n = 300;
     typedef struct { uint64_t pc; int c; } spot;
     static spot top[64]; int ntop = 0;
@@ -405,6 +407,7 @@ static void *guest_sampler_main(void *arg) {
         if (thread_get_state(t->mport, ARM_THREAD_STATE64, (thread_state_t)&st, &cnt) == KERN_SUCCESS) pc = __darwin_arm_thread_state64_get_pc(st);
         thread_resume(t->mport);
         if (!pc) continue;
+        { static FILE *sf; if (!sf) sf = fopen("/tmp/guest_samples.txt", "a"); if (sf) { fprintf(sf, "%#llx\n", (unsigned long long)pc); fflush(sf); } }
         int k = -1; for (int j = 0; j < ntop; j++) if (top[j].pc == pc) { k = j; break; }
         if (k < 0) { if (ntop < 64) { k = ntop++; top[k].pc = pc; top[k].c = 0; } else continue; }
         top[k].c++;
@@ -419,6 +422,7 @@ static void *guest_sampler_main(void *arg) {
     }
     return NULL;
 }
+uint64_t g_samp_frame;   // optional: start sampling at this presented frame instead of after a wall-clock delay
 void dm_guest_sample_start(unsigned h, unsigned ms, unsigned n, unsigned delay_s) {
     pthread_t th; uint64_t v = ((uint64_t)h << 32) | ((uint64_t)(ms & 0xffff) << 16) | (n & 0xffff) | ((uint64_t)(delay_s & 0xffff) << 48);
     if (!pthread_create(&th, NULL, guest_sampler_main, (void *)v)) pthread_detach(th);
