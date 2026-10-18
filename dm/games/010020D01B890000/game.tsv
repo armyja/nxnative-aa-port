@@ -1,0 +1,42 @@
+# 临时游戏档案（手工粗建，未核对）| Provisional game profile (hand-made, not checked)
+# Apollo Justice: Ace Attorney Trilogy (逆转裁判456 王泥喜精选集), RE Engine
+
+# ---- Identity ----
+title_id	010020D01B890000
+program_id	010020D01B890000
+
+# ---- App ----
+name	Apollo Justice: Ace Attorney Trilogy
+ipa	ApolloJusticeAceAttorneyTrilogy.ipa
+app_category	public.app-category.games
+pad_layout	simple
+
+# ---- Versions ----
+build	v65536	1.0.0	main=dbe49182fbca27691c65b23c9e105d1f	sdk=8618895246b420329b77746b960a66ab	subsdk0=368f01d5cb42f06cd125dc739d036719
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	re_chunk_000.pak
+
+# ---- Memory ----
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+
+# ---- NVN driver constant segments（先沿用 123 的值，起机后按实际调整）----
+nvn_tex_base	0x20
+nvn_tex_slots	32
+nvn_samp_base	0x568
+nvn_img_base	0x120
+nvn_img_slots	8
+nvn_ssbo_bases	vs=0x110 ps=0x510 cs=0x310
+
+# ---- Shader split ----
+shader_groups	/re_chunk_000.pak=root
+shader_note	Apollo Justice: Ace Attorney Trilogy (provisional, RE Engine)
+
+device_api	53.313
+zip_store	.pak

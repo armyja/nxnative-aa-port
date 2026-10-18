@@ -24,14 +24,37 @@ static class P {
 
     static int Main(string[] a) {
         bool manifest = Array.IndexOf(a, "--manifest") >= 0; a = Array.FindAll(a, s => s != "--manifest");
+        bool info = Array.IndexOf(a, "--info") >= 0; a = Array.FindAll(a, s => s != "--info");
+        bool noExefs = Array.IndexOf(a, "--no-exefs") >= 0; a = Array.FindAll(a, s => s != "--no-exefs");
         if (a.Length < 4) { Console.Error.WriteLine("用法 | usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--manifest]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir>"); return 2; }
         KeySet ks = ExternalKeyReader.ReadKeyFile(a[0]);
         if (a[1] == "--aoc") return Aoc(ks, a[2], a[3]);
-        var basePkg = OpenNsp(ks, a[1]); var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2]);
+        // XCI（卡带镜像）也支持：安全分区是基础游戏，update 分区（若有）是更新包
+        List<Nca> basePkg, updPkg;
+        if (a[1].EndsWith(".xci", StringComparison.OrdinalIgnoreCase)) {
+            var xci = new Xci(ks, new LocalStorage(a[1], FileAccess.Read));
+            // 卡带：secure 分区是基础游戏，normal 分区里放控制数据 + 更新（v1.0.1）的 NCA
+            basePkg = OpenXciPartition(ks, xci, XciPartitionType.Secure);
+            List<Nca> normalPkg = null;
+            try { normalPkg = OpenXciPartition(ks, xci, XciPartitionType.Normal); } catch { }
+            if (normalPkg != null) basePkg.AddRange(normalPkg);   // 控制数据（NACP）/ meta 在这里
+            if (a[2] == "-") {
+                updPkg = null;
+                if (normalPkg != null && Pick(normalPkg, NcaContentType.Program) != null) updPkg = normalPkg;   // normal 里的程序 NCA 是更新版
+            } else updPkg = OpenNsp(ks, a[2]);
+        } else {
+            basePkg = OpenNsp(ks, a[1]); updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2]);
+        }
         Nca baseProg = Pick(basePkg, NcaContentType.Program) ?? throw new Exception("基础 NSP 里没有程序 NCA | no Program NCA in the base NSP");
-        Nca updProg = updPkg == null ? null : Pick(updPkg, NcaContentType.Program) ?? throw new Exception("更新 NSP 里没有程序 NCA | no Program NCA in the update NSP");
+        Nca updProg = updPkg == null ? null : Pick(updPkg, NcaContentType.Program);   // XCI 的 update 分区可能只有补丁 NCA（没有独立程序 NCA）：按纯基础版处理
         Nca ctrl = Pick(updPkg ?? basePkg, NcaContentType.Control);
         Console.WriteLine($"标题 | title {baseProg.Header.TitleId:x16}" + (updProg != null ? $"，更新 | update {updProg.Header.TitleId:x16}" : ""));
+        if (info) {
+            Console.WriteLine($"基础分区 NCA：{basePkg.Count}");
+            foreach (Nca n in basePkg) Console.WriteLine($"  {n.Header.ContentType,-12} {n.Header.TitleId:x16}");
+            if (updPkg != null) { Console.WriteLine($"更新分区 NCA：{updPkg.Count}"); foreach (Nca n in updPkg) Console.WriteLine($"  {n.Header.ContentType,-12} {n.Header.TitleId:x16}"); }
+            return 0;
+        }
         string outDir = a[3], cmpDir = a.Length > 4 ? a[4] : null;
         if (ctrl != null) {   // control data (NACP): display version and game name; a raw copy goes to <output dir>/control.nacp for naming the app
             byte[] nacp = Nacp(ctrl);
@@ -43,6 +66,7 @@ static class P {
             else Console.WriteLine("控制数据里没有图标 | no icon in the control data");
         }
         // Code section: the update's ExeFS is complete; opening it layered over the base gives the same result
+        if (!noExefs) {
         IFileSystem exefs = updProg != null ? baseProg.OpenFileSystemWithPatch(updProg, NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid);
         Copy(exefs, Path.Combine(outDir, "ExeFS"), null);
         string[] mods = Directory.GetFiles(Path.Combine(outDir, "ExeFS")); Array.Sort(mods, StringComparer.Ordinal);
@@ -50,6 +74,7 @@ static class P {
             if (new FileInfo(p).Length < 0x50) continue;
             byte[] h = new byte[0x50]; using (var f = File.OpenRead(p)) f.ReadExactly(h);
             if (h[0] == 'N' && h[1] == 'S' && h[2] == 'O' && h[3] == '0') Console.WriteLine($"{Path.GetFileName(p)} 构建号 | build id {Convert.ToHexString(h, 0x40, 16).ToLowerInvariant()}");
+        }
         }
         IStorage romfs = updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
         if (manifest) Manifest(new RomFsFileSystem(romfs), Path.Combine(outDir, "romfs_manifest.tsv"));
@@ -85,6 +110,19 @@ static class P {
         return ncas;
     }
     static Nca Pick(List<Nca> l, NcaContentType t) { foreach (Nca n in l) if (n.Header.ContentType == t) return n; return null; }
+
+    // Open one XCI partition and list all NCAs in it (game cards carry no tickets; the NCTL/card keys live in prod.keys)
+    static List<Nca> OpenXciPartition(KeySet ks, Xci xci, XciPartitionType t) {
+        IFileSystem fs = xci.OpenPartition(t);
+        var ncas = new List<Nca>();
+        foreach (DirectoryEntryEx e in fs.EnumerateEntries("*", SearchOptions.Default)) {
+            if (!e.Name.EndsWith(".nca", StringComparison.OrdinalIgnoreCase)) continue;
+            using var f = new UniqueRef<IFile>();
+            fs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+            ncas.Add(new Nca(ks, f.Release().AsStorage()));
+        }
+        return ncas;
+    }
 
     // Icon: the control data holds one 256x256 JPEG per language (/icon_<language>.dat). Use the English one (American, then British); if neither exists, take the first in NACP language order
     static readonly string[] IconLangs = { "AmericanEnglish", "BritishEnglish", "Japanese", "French", "German", "LatinAmericanSpanish", "Spanish", "Italian",
