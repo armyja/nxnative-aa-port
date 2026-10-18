@@ -1338,8 +1338,20 @@ static uint64_t g_texinfo_ser[8]; static int g_texinfo_n;
 static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     tex_t *t = (tex_t *)ct;
     if (!t || !t->serial) return nil;
+    {   // Debug DM_TEX_REUPLOAD=serial[:frame]: once past that frame, forget the cached MTLTexture of that serial so the upload path rebuilds it
+        // (tests whether a texture whose content was streamed in after the first upload is only missing the re-upload)
+        static long long ser = -2; static int done; static long long at = 1200;
+        if (ser == -2) { ser = -1; const char *e = getenv("DM_TEX_REUPLOAD"); if (e) { char b[128]; int n = sscanf(e, "%lld:%lld", &ser, &at); if (n < 1) ser = -1; (void)b; } }
+        if (ser >= 0 && !done && (long long)t->serial == ser && (long long)atomic_load(&g_cur_frame) >= at) { done = 1; serial_del(t->serial); MLOG("[texredo] 重传 ser=%lld（帧 %lld）", ser, at); }
+    }
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(70, "贴图对象已失效（magic %#x，首例 ser=%llu）：不建 MTLTexture", t->magic, (unsigned long long)t->serial); return nil; }
     int packaged = (t->has_layout || tex_cpu_written(t->serial)) && t->mem;
+    // Virtual-pool textures are filled by the engine through the aliased physical pages (compressed formats cannot be zero-copy linear textures), so
+    // guest memory is their source of truth: upload once on first use. AA456's 2880x2880 BC7 sprite atlas lives in the 64 GB virtual pool and stayed
+    // black because it never took any upload path. No dirty-based re-upload: the engine writes those pools constantly and it would re-upload per frame.
+    static int up_all = -1; if (up_all < 0) up_all = getenv("DM_TEX_UPLOAD_ALL") ? 1 : DM_GAME_TEX_UPLOAD_ALL;   // profile tex_upload / env override
+    int vpool = t->mem && t->pool && ((t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) ||
+                (up_all && !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) && on_sub_thread()));
     {   // Diagnostic DM_NVN_TEXINFO=WxH: log storage and description of textures of that size on first resolution (to tell whether two textures share storage and why they were not merged)
         static int ti = -1; static uint32_t tw, th; static uint64_t last[64]; static int nl;
         if (ti > 0 && t->d.width == tw && t->d.height == th && g_texinfo_n < 8) { int dup = 0; for (int i = 0; i < g_texinfo_n; i++) dup |= g_texinfo_ser[i] == t->serial; if (!dup && !(t->d.flags & 8)) g_texinfo_ser[g_texinfo_n++] = t->serial; }   // remember the non-render-target ones (no COMPRESSIBLE) for DM_NVN_TEXRAW=info
@@ -1354,6 +1366,12 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         }
     }
     id have = serial_get(t->serial);
+    if (!packaged && vpool && !have) {   // one-shot upload from the aliased guest storage
+        uint64_t st; id<MTLTexture> nt = pkg_upload(t, &st);
+        if (nt) { uint64_t nz = 0; for (uint64_t q = 0; q < t->L.size && q < (8u << 20); q++) nz += t->mem[q] != 0;
+            MLOG("[vpool上传] ser=%llu %ux%u 格式=%#x 存储=%llu 非零(前8MB)=%llu", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, (unsigned long long)t->L.size, (unsigned long long)nz);
+            res_add(nt); serial_put(t->serial, nt); g_pkg_uploads++; return nt; }
+    }
     if (packaged) {
         NvPkg *pk = [have isKindOfClass:[NvPkg class]] ? have : nil;   // resolved as GPU-only before the CPU wrote it: dropped and rebuilt as packaged
         if (pk) {   // Already uploaded: check the covered pages only if there has been a guest write since the last check
@@ -2343,12 +2361,44 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
 }
 void mtl_prog_release(prog_t *p) { if (p->serial) serial_del(p->serial); }
 
+
 // ---------- Descriptor pool: texture ID / sampler ID → object ----------
 // At registration the whole texture object is snapshotted (NVN semantics: the descriptor has been written into the pool); view: the MTLTexture for that ID (a view or the base texture, held via CFBridgingRetain) and the serial-table / guest-write generations at the time it was obtained
 typedef struct { tex_t t; int ok; view_t v; int has_v; void *view; uint64_t view_id, view_rid, view_ser, view_dirty;
                  void *alt, *alt_of; uint64_t alt_rid; uint8_t alt_type;   // alt: compatible view used when the shader's declared type differs from view (tex_fit), alt_of = the view it was built from
                  void *ar, *ar_of; uint64_t ar_rid; } treg_t;              // ar: the alpha-from-red view for the profile's alpha_from_red shaders (tex_alpha_red), ar_of = the view it was built from
 static treg_t *g_treg; static int g_ntreg;
+// DM_TEXWATCH=<pool_off_hex> diagnostic: every 60 presents log the storage size and non-zero byte count of every registered texture living at that
+// pool offset (AA456's 2880x2880 BC7 sprite atlas sits at virtual pool offset 0x56400000 and stays black). Answers "when/does the game fill it".
+void mtl_watch_tex(uint64_t off) {
+    static int tick;
+    if (++tick % 60) return;
+    pthread_mutex_lock(&g_rmu);
+    for (int i = 0; i < g_ntreg; i++) {
+        treg_t *r = &g_treg[i]; if (!r->ok || r->t.off != (ptrdiff_t)off) continue;
+        tex_t *t = &r->t; uint64_t nz = 0, sz = t->L.size;
+        if (t->mem) for (uint64_t k = 0; k < sz && k < (8u << 20); k++) nz += t->mem[k] != 0;
+        MLOG("[texwatch] 第 %d 次出图：id=%d ser=%llu pool=%p off=%#llx mem=%p size=%llu 非零 %llu", tick, i, (unsigned long long)t->serial, (void *)t->pool, (unsigned long long)t->off, (void *)t->mem, (unsigned long long)sz, (unsigned long long)nz);
+        { void nvn_vmap_probe(const void *, uint64_t); if (t->mem) nvn_vmap_probe(t->mem, sz); }
+        { static int dumped; const char *dp = getenv("DM_TEXWATCH_DUMP"); if (dp && *dp && !dumped && t->mem) { dumped = 1; FILE *f = fopen(dp, "wb"); if (f) { fwrite(t->mem, 1, (size_t)sz, f); fclose(f); } MLOG("[texwatch] 已转储 %llu 字节 → %s", (unsigned long long)sz, dp); } }
+    }
+    pthread_mutex_unlock(&g_rmu);
+}
+
+// DM_TEXDUMP_MEM=id:path[:present] diagnostic: dump the registered texture with that ID (the tid of the pass dump) and its guest storage.
+void mtl_dump_tex_mem(int tid, const char *path) {
+    pthread_mutex_lock(&g_rmu);
+    const treg_t *r = tid >= 0 && tid < g_ntreg ? &g_treg[tid] : NULL;
+    const tex_t *t = r && r->ok ? &r->t : NULL;
+    uint8_t *mem = t ? t->mem : NULL; uint64_t sz = t ? t->L.size : 0, nz = 0;
+    if (mem) for (uint64_t i = 0; i < sz && i < (8u << 20); i++) nz += mem[i] != 0;
+    if (mem && sz) { FILE *f = fopen(path, "wb"); if (f) { fwrite(mem, 1, (size_t)(sz > (64u << 20) ? (64u << 20) : sz), f); fclose(f); } }
+    { void nvn_vmap_probe(const void *, uint64_t); if (mem) nvn_vmap_probe(mem, sz); }
+    MLOG("[texmem] id=%d ok=%d ser=%llu pool=%p off=%#llx mem=%p size=%llu 非零(前 8MB) %llu → %s", tid, r ? r->ok : -1,
+         (unsigned long long)(t ? t->serial : 0), t ? (void *)t->pool : NULL, (unsigned long long)(t ? t->off : 0),
+         (void *)mem, (unsigned long long)sz, (unsigned long long)nz, path);
+    pthread_mutex_unlock(&g_rmu);
+}
 // Lock-free copy of texture ID → serial (the replay hot path only needs the serial: store lookahead index, binding set of the clear-only hoist): texture IDs are 20 bits, fixed 1M entries (BSS, only touched pages are used),
 // release write at registration, relaxed atomic read on the reader side, without entering g_rmu (the former h_ser locked and unlocked on every lookup, thousands of times per frame in the camp)
 static _Atomic uint64_t g_tser[1 << 20];
@@ -3087,8 +3137,9 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             }
             slots[aid] = gpu;
             USE((__bridge id<MTLBuffer>)mb, MTLResourceUsageRead);
-        } else if (b->kind == NVN_RB_SAMP || b->kind == NVN_RB_SAMPT || b->kind == NVN_RB_SAMPU) {   // SAMPT: the sampler part of a combined handle (texture ID | sampler ID << 20); SAMPU: the same, with the handle in a uniform buffer
-            int sid = b->kind == NVN_RB_SAMPU ? (int)(ubo_handle(nvn_stage, reg, b->off) >> 20) :
+        } else if (b->kind == NVN_RB_SAMP || b->kind == NVN_RB_SAMPT || b->kind == NVN_RB_SAMPU || b->kind == NVN_RB_SAMPID) {   // SAMPT: the sampler part of a combined handle (texture ID | sampler ID << 20); SAMPU: the same, with the handle in a uniform buffer; SAMPID: a constant sampler ID baked into the shader
+            int sid = b->kind == NVN_RB_SAMPID ? reg :
+                      b->kind == NVN_RB_SAMPU ? (int)(ubo_handle(nvn_stage, reg, b->off) >> 20) :
                       reg < 128 ? (int)((b->kind == NVN_RB_SAMPT ? S.tex[nvn_stage][reg] : S.samp[nvn_stage][reg]) >> 20) : 0;
             __unsafe_unretained id<MTLSamplerState> ss = sid ? (__bridge id<MTLSamplerState>)samp_fast(sid) : nil;
             slots[aid] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();
@@ -3160,6 +3211,9 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                     }
                 } else {
                     for (int r = 0; r < DM_GAME_NVN_TEX_SLOTS; r++) { uint32_t th = (uint32_t)S.tex[nvn_stage][r]; memcpy(d + DM_GAME_NVN_TEX_BASE + 8 * r, &th, 4); }
+                    // RE Engine also reads the legacy 32-slot texture table at c[2]+0x20 (its separate-texture bindings use handle words 8.., i.e. that table);
+                    // mirror the texture slots there so both binding models see the handle of the slot they name (no-op when the profile already uses 0x20)
+                    if (DM_GAME_NVN_TEX_BASE != 0x20) for (int r = 0; r < 32; r++) { uint32_t th = (uint32_t)S.tex[nvn_stage][r]; memcpy(d + 0x20 + 8 * r, &th, 4); }
                     for (int r = 0; r < DM_GAME_NVN_IMG_SLOTS; r++) { uint32_t ih = (uint32_t)S.img[nvn_stage][r]; memcpy(d + DM_GAME_NVN_IMG_BASE + 8 * r, &ih, 4); }   // This game (NVN 55): texture handle table at 0x20 + 8 r (dm/gfx/tools/dmsh_build.py TEX_BASE)
                     // separate sampler handle table (older driver layout such as Engage's: textures 0x168 + 8 r, samplers 0x568 + 8 r; Mario uses no separate samplers, so this is all zero)
                     for (int r = 0; r < 128; r++) { uint32_t sh_ = (uint32_t)S.samp[nvn_stage][r]; memcpy(d + DM_GAME_NVN_SAMP_BASE + 8 * r, &sh_, 4); }

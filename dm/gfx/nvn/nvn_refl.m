@@ -3,6 +3,7 @@
 #import <Metal/Metal.h>
 #include <stdio.h>
 #include <string.h>
+#include "game_profile.h"   // DM_GAME_NVN_TEX_BASE / _SLOTS / IMG_BASE / IMG_SLOTS: the driver handle tables this port writes and decodes
 
 // Dummy texture type: same prefix rules as the original dummy_tex (an unbound texture slot reads 0 per D3D semantics)
 static void dummy_kind(NSString *t, uint8_t *tt, uint8_t *pf) {
@@ -26,6 +27,12 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         if (![bs isKindOfClass:[NSArray class]]) FAIL("缺 bindings");
         if (bs.count > NVN_REFL_MAXB) FAIL("绑定 %lu 个，超上限 %d", (unsigned long)bs.count, NVN_REFL_MAXB);
         o->route_b = 1; o->abi = 0;   // spirv-cross set 0 → [[buffer(0)]]
+        // dmsh_build.py could not pair these with a PC reflection ("no paired PC reflection"): every texture of such a program came out with reg 0, so all
+        // texture arguments sampled register 0 (AA456's layered background: three plane textures bound at consecutive registers, all read as one → black).
+        // Fall back to binding order for the texture-like kinds, which is how the game binds them (consecutive slots from the first one).
+        int unreflected = 0;
+        { NSArray *nts = j[@"notes"]; if ([nts isKindOfClass:[NSArray class]]) for (NSString *nt in nts) if ([nt containsString:@"无配对 PC 反射"]) unreflected = 1; }
+        int tex_seq = 0;
         for (NSDictionary *b in bs) {
             NSString *k = b[@"kind"]; nvn_rbind *r = &o->b[o->nb];
             id rg = b[@"reg"]; int reg = [rg isKindOfClass:[NSNumber class]] ? [rg intValue] : -1, aid = [b[@"arg_id"] intValue];
@@ -44,6 +51,39 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@"c1"]) r->kind = NVN_RB_C1;
             else if ([k isEqualToString:@"drvcb"]) r->kind = [b[@"bank"] intValue] == 2 ? NVN_RB_DRV2 : NVN_RB_DRV0;
             else FAIL("B 绑定种类 %s 未实现（%s）", k.UTF8String, [b[@"msl_name"] UTF8String]);
+            // RE Engine's separate-constant sampler handles (TextureHandleType.SeparateConstantSamplerHandle, handle type 3): the sampler is a constant
+            // sampler ID in bits 14..27 of the immediate, not an index into the driver's c[2] sampler table, so dmsh_build.py cannot give it a slot (reg = -1).
+            // The game registers that ID with nvnSamplerPoolRegisterSampler, so replay resolves it by ID (NVN_RB_SAMPID).
+            if ([k isEqualToString:@"samp"] && reg < 0) {
+                NSString *nm = b[@"msl_name"];
+                NSString *base = [nm hasSuffix:@"Smplr"] ? [nm substringToIndex:nm.length - 5] : nm;
+                NSRange us = [base rangeOfString:@"_" options:NSBackwardsSearch];
+                if (us.location != NSNotFound) {
+                    unsigned long long h = strtoull([[base substringFromIndex:us.location + 1] UTF8String], NULL, 16);
+                    if ((h >> 28) == 3) { r->kind = NVN_RB_SAMPID; reg = (int)((h >> 14) & 0x3fff); r->reg = (uint16_t)reg; }
+                }
+            }
+            // RE Engine reads textures from more than one driver table while dmsh_build.py only decodes the profile's (combined-handle) table:
+            //   the legacy 32-slot texture table at c[2]+0x20 (its separate-texture bindings; handle words 8..), the image table at c[2]+IMG_BASE
+            //   (handle words 72.., sampled read-only) and the profile table at TEX_BASE (handle words 90.., already decoded by the build).
+            // The replay mirrors texture slots into the 0x20 table as well, so a binding whose handle word falls in either window resolves here.
+            if (reg < 0 && (r->kind == NVN_RB_TEX || r->kind == NVN_RB_SAMPT || r->kind == NVN_RB_IMG)) {
+                NSString *nm = b[@"msl_name"];
+                NSRange us = [nm rangeOfString:@"_" options:NSBackwardsSearch];
+                unsigned long long h = us.location != NSNotFound ? strtoull([[nm substringFromIndex:us.location + 1] UTF8String], NULL, 16) : 0;
+                unsigned bytes = (unsigned)(h & 0x3fff) * 4u;
+                int slot = -1;
+                if (bytes >= 0x20u && bytes < 0x20u + 8u * 32u && (bytes - 0x20u) % 8u == 0) slot = (int)((bytes - 0x20u) / 8u);
+                else if (bytes >= (unsigned)DM_GAME_NVN_TEX_BASE && bytes < (unsigned)DM_GAME_NVN_TEX_BASE + 8u * (unsigned)DM_GAME_NVN_TEX_SLOTS && (bytes - (unsigned)DM_GAME_NVN_TEX_BASE) % 8u == 0)
+                    slot = (int)((bytes - (unsigned)DM_GAME_NVN_TEX_BASE) / 8u);
+                else if (bytes >= (unsigned)DM_GAME_NVN_IMG_BASE && bytes < (unsigned)DM_GAME_NVN_IMG_BASE + 8u * (unsigned)DM_GAME_NVN_IMG_SLOTS && (bytes - (unsigned)DM_GAME_NVN_IMG_BASE) % 8u == 0) {
+                    slot = (int)((bytes - (unsigned)DM_GAME_NVN_IMG_BASE) / 8u); if (r->kind == NVN_RB_TEX || r->kind == NVN_RB_SAMPT) r->kind = NVN_RB_IMG;
+                }
+                if (slot >= 0) { reg = slot; r->reg = (uint16_t)slot; }
+            }
+            // No PC reflection: the build wrote reg 0 for every texture binding; give them consecutive registers in declaration order instead (AA456's
+            // background program samples three plane textures bound at consecutive slots; with all three at slot 0 it read one plane three times → black)
+            if (unreflected && (r->kind == NVN_RB_TEX || r->kind == NVN_RB_SAMPT || r->kind == NVN_RB_IMG)) { reg = tex_seq; r->reg = (uint16_t)tex_seq; tex_seq++; }
             if ((r->kind == NVN_RB_CBUF || r->kind == NVN_RB_SAMP || r->kind == NVN_RB_SAMPT || r->kind == NVN_RB_TEX || r->kind == NVN_RB_IMG || r->kind == NVN_RB_TBUF || r->kind == NVN_RB_SBUFP || r->kind == NVN_RB_UBOP || r->kind == NVN_RB_TEXU || r->kind == NVN_RB_SAMPU) && reg < 0)
                 FAIL("B 绑定 %s 没解出槽号", [b[@"msl_name"] UTF8String]);
             o->nb++;

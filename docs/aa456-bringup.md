@@ -1,8 +1,10 @@
-# Ace Attorney 456 bring-up notes (research, not yet running)
+# Ace Attorney 456 bring-up notes
 
-Status: the code modules load and the game runs its own initialisation, then aborts while setting up
-its memory pools. Everything below was measured on this fork's host build; no game data is needed to
-follow the reasoning, and no game content is reproduced here.
+Status: the game boots to its title screen, menus, game selection and the first episode, advances
+dialogue, and saves / loads game data (verified across a restart). In-scene background art and
+characters are still black, and the logo / opening movies decode to black frames; both are known
+graphics gaps (see "What is left"). Everything below was measured on this fork's host build; no game
+content is reproduced here.
 
 ## Title
 
@@ -31,60 +33,81 @@ local disk first, then extract (14 GB image → ~90 s).
 
 ## Profile and build
 
-`dm/games/010020D01B890000/game.tsv` is provisional: identity, build ids, modules, `romfs_marker`,
-and memory/NVN constants copied from another profile. The host builds, the three modules rewrite,
-and the game reaches its own initialisation.
+`dm/games/010020D01B890000/game.tsv` carries the identity, build ids, modules, `romfs_marker`,
+memory partition (`mem_reserve` 4 GB, alias / stack 256 MB each, `app_pool` 0xcd500000) and the
+NVN constants; the shader tables in the same folder are generated (below). The host builds, the
+three modules rewrite, and the game reaches `nnMain`.
 
-## Where it stops
+## The startup abort (fixed)
 
-```
-nn::diag::Abort (host HLE, Result 0)
-  <- sdk+0x11ff34      abort wrapper
-  <- main+0x57fdd80    return address of the failing call
-  <- main+0x2bff788    RE Engine init: computes a size, then creates a pool
-```
-
-The initialisation at `main+0x2bff730` computes `(a - b) & ~0x1fffff` (a 2 MB aligned size, 8 MB in
-practice), stores it in a global, then calls `0x57fdd40(pointer, size)`. That call funnels through an
-import table (`main+0xa27a8f8 -> sdk+0x11fe74`), which validates the request:
+The first abort was not in the address-space allocator. `main+0x2bff730` sizes the engine's memory:
 
 ```
-sdk+0x11fe74   ldrb w9,[x0]; cbnz w9, abort          state byte must be 0
-               start == 0 -> sdk+0x11fed4            "map anywhere"
-               bl 0x5c38e0  (-> sdk+0x12cb10)        precondition, bit 0 must be set
-               bl 0x5c4020  (-> sdk+0x11e5e4)        map, Result must be 0
-sdk+0x11e5e4   size != 0, page aligned, [state+0x28] == 0
-sdk+0x11e6a8   bl 0x5c3f50  (-> sdk+0x111b00)        VAMM address-range allocator
+QueryMemoryInfo(&info)                          ; MemoryInfo[0] = TotalNonSystemMemorySize
+                                                ; MemoryInfo[8] = UsedNonSystemMemorySize
+SetMemoryHeapSize((total - used) & ~0x1fffff)   ; observed request 0xc9200000
+AllocateMemoryBlock(&p, 0x800000)
+StandardAllocator::Initialize(p, 0x800000, false)   ; p stayed 0 -> sdk+0x11fe74 aborts
 ```
 
-Measured arguments: `start = 0`, `size = 0x800000`.
+The host's `UsedNonSystemMemorySize` counted the heap plus 64 MB but not the module images
+(166 + 15 + 7 MB, 0xbe00000 after 2 MB alignment), so `0xc9200000 + 0xbe00000` exceeded the
+`0xcd500000` pool: `SetHeapSize` answered 0x10801, the engine does not retry, `AllocateFromHeap`
+returned 0x1003 and the pool was built on a null pointer. `hle_svc.c` now reports
+`I_UsedNonSys = heap + image_bytes()` (id 7 keeps the old approximation), which makes the request
+fit exactly; the 8 MB allocator then builds normally.
 
-## The failing interface
+### The misread caller
 
-With `DM_QMLOG=1` the host prints every `svcQueryMemory` with its guest caller:
+`DM_QMLOG` used to print `svcQueryMemory`'s caller as `sdk+0xdff9e8`, which sent earlier rounds
+after the host stack. That address is the **return point of a rewritten-SVC gate block**: the
+original instruction is `svc #6` at `sdk+0x158318` (the `nn::svc::QueryMemory` wrapper), the gate
+block in the patch area `blr x30`s from `sdk+0xdff9c8` and its return address is 0xdff9e8
+(`sdk.gates.tsv`: `0xdff9e8  svc 6  0x158318`). The log now prints the original site, and
+`gate_register` stores the site as an absolute address (it also fixes the `ThreadContext` PC that
+`thr_svc_enter` gives the guest).
 
-```
-QueryMemory 0x16f...  caller sdk+0xdff9e8
-QueryMemory 0x0       caller sdk+0xdff9e8
-```
+## SDK services that had to be taken over
 
-The address looks like a **host stack pointer**: guest code runs on the host stack on this port, so
-an address-space manager that probes the stack to decide what is free sees a region that does not
-exist in the emulated guest address space. The host answers "unknown", the allocator concludes there
-is no room, and RE Engine aborts.
+| Entry point | Why |
+|---|---|
+| `nn::oe::IsCpuOverclockEnabled` | `oe::Initialize` is a host no-op, so `nn::apm`'s client is null; the SDK path dereferences it at `sdk+0x1c2bcc`. Answer false. |
+| `nn::oe::GetNotificationMessageEvent` | Returns the SDK global that `oe::Initialize` would have created; `InitializeMultiWaitHolder` aborts on its type byte (+0x28) being 0. Build a real `SystemEventType` with `nn::os::CreateSystemEvent`. |
+| `nn::oe::GetDefaultDisplayResolution[ChangeEvent]` | Reaches `am::GetCommonStateGetter`, which is null without am (crash at `sdk+0x39b370`). Report 1920x1080 and create a never-signalled event. |
+| `nn::album::Initialize` (and Finalize / Save* / ShowAlbumFiles) | Its tail call `LibraryState::EnsureAlbumAvailable` aborts when `capsrv::InitializeForApplication` fails (`nn::sm::Initialize` at `sdk+0x1404bc`). No album service: no-op / failure. |
 
-## Ruled out
+## Shaders: the NVN programs are in the pak's `.sdf` files
 
-- **Pool size**: raising `mem_reserve` / `app_pool` from 4 GB / 3.2 GB to 6 GB / 5 GB changes nothing.
-- **Unimplemented NVN calls**: no red-stub hits are logged before the abort.
-- **Reporting the host stack as a Stack region**: `hle_svc.c` now recognises the host stack range in
-  `QueryMemory` (state 3), but the abort is unchanged, so this alone is not sufficient.
+`re_chunk_000.pak` is a KPKA 4.0 archive (16-byte header, 48-byte entries `{hashLo, hashHi, offset,
+packed, size, attrs, checksum}`, zstd or raw deflate by `attrs & 0xF`). The compiled programs live
+in the `.sdf` shader definitions: `SDF\0` header, then per program a 0x880-byte control section
+(magic 0x98761234, code length at +0x704) immediately followed by its code area. Graphics stage =
+SPH word 0 bits 10..13 (1 vertex, 2 hull, 3 domain, 4 geometry, 5 pixel); compute code uses magic
+0x12345679 with instructions at +0x100. `dm/tools/repak.py sdf <pak> <dir>` extracts them without a
+name list, `shader_split.py` reads them (`sdf_shaders`) and the profile sets `shader_separable on`
+for the vertex / pixel cover pairs.
 
-## Next steps
+105 files → 5,093 programs (316 vertex, 2,653 pixel, 2,097 compute, 11 geometry, 7 hull, 9 domain);
+`dmsh_build.py` translated 5,012 of them. The 81 failures are 38 compute shaders using subgroup
+builtins, 25 spirv-cross failures and 18 Metal compile failures (geometry shaders, which Metal has
+no stage for). On this machine run `dmsh_xlate` with
+`DOTNET_ROOT=/opt/homebrew/Cellar/dotnet/10.0.401_1/libexec` (the Homebrew wrapper sets it).
 
-1. Disassemble `sdk+0xdff9e8` and determine which field of the `QueryMemory` result it consumes, and
-   why it probes a stack address at all (it may be testing "does this pointer belong to the heap").
-2. Then either make `QueryMemory` answer usefully for such addresses, or give the guest its own stack
-   in the guest address space instead of reusing the host stack.
-3. After the pool exists, the next unknown is graphics: RE Engine keeps its shaders inside the pak,
-   so the shader extraction/translation path will need work of its own.
+## What is left
+
+1. **Sparse virtual memory is the main suspect for the black scene background.** RE Engine's 64 GB
+   virtual pool maps non-contiguous physical ranges; `nvnMemoryPoolMapVirtual` rejects ten of them
+   ("true sparse mapping not implemented"), and the host points the virtual pool at a single
+   physical base. A proper fix reserves real address space for the virtual pool, aliases each mapped
+   physical range into it with Mach `vm_remap` (16 KB host pages), and resolves virtual-pool
+   addresses through the mapping table in `mtl_gpu_addr` (a 64 GB range cannot be one MTLBuffer).
+   Pass dumps of the dialogue scene show all textures "real" and ~84 draws per frame into
+   1920x1080 targets, so the pipeline runs and only the content is black.
+2. **AVC movies**: the logo / opening movies use decoder type 1 (AVC/VP8); the host only decodes VP9
+   and returns black frames. VideoToolbox could add H.264 on Mac and iOS.
+3. Save timestamps show 01/01/1970 (the guest clock source is 0; cosmetic, same family as the AA123
+   DateTime issue).
+4. Frame rate is about 29 fps (34 ms/frame, 125 draws/frame, ~3.9 ms shader translation on the CPU).
+5. `pso_manifest.tsv` does not exist yet; `nvn_tex_base` (0x168, 128 slots), `nvn_samp_base` (0x568)
+   and `nvn_img_base` (0x120) are now measured, and the host also decodes the legacy 0x20 texture
+   table (see 04-graphics.md).

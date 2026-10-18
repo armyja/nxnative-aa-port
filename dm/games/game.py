@@ -94,6 +94,8 @@ def header(g):
     sf = g.get('shared_font', 'bfttf')   # what the shared-font address points at (hle_sdk16.c): bfttf = 8-byte header + TTF, ttf = the TTF alone
     if sf not in ('bfttf', 'ttf'): sys.exit(f'{g.id}: shared_font 只能是 bfttf / ttf | shared_font must be bfttf or ttf: {sf}')
     pl = g.get('pad_layout', 'simple')   # the virtual gamepad's first layout (DmGamepad.m; afterwards whatever the player switched to in game is kept): simple = 2D, full = 3D (D-pad, right stick, L3 / R3)
+    tu = g.get('tex_upload', 'off')   # block-linear textures in CPU-visible physical pools that the game fills itself get a one-shot upload (no packaged data, no CPU-write hook): on / off
+    if tu not in ('on', 'off'): sys.exit(f'{g.id}: tex_upload 只能是 on / off | tex_upload must be on or off: {tu}')
     if pl not in ('simple', 'full'): sys.exit(f'{g.id}: pad_layout 只能是 simple / full | pad_layout must be simple or full: {pl}')
     fbs = g.words('feedback_snap', '')   # fragment shader key prefixes whose same-pass feedback sampling gets a snapshot first (nvn_mtl.m fb_prepare); none by default
     if any(not re.fullmatch(r'[0-9a-f]{8,16}', k) for k in fbs): sys.exit(f'{g.id}: feedback_snap 要写片元着色器键（8–16 位小写十六进制）| feedback_snap takes fragment shader keys (8-16 lowercase hex digits): {fbs}')
@@ -124,6 +126,7 @@ def header(g):
          f'#define DM_GAME_PRESENT_DISPLAY {int(pi == "display")}',
          f'#define DM_GAME_CORE_PREEMPT {int(cp == "on")}',
          f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}',
+         f'#define DM_GAME_TEX_UPLOAD_ALL {int(tu == "on")}',
          f'#define DM_GAME_PAD_FULL {int(pl == "full")}',
          f'#define DM_GAME_FEEDBACK_SNAP {q(" ".join(fbs))}',
          f'#define DM_GAME_ALPHA_FROM_RED {q(" ".join(afr))}',

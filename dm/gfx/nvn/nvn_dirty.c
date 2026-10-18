@@ -159,13 +159,16 @@ void nvn_dirty_protect(const void *addr, size_t len) {
     }
 }
 uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }
+// Implemented in hle_nvn.c: a virtual-pool mapping aliases physical pool pages (vm_remap), so a write the game makes through the physical address
+// must also count as a write to the virtual address; check the aliased physical range when the virtual one is clean.
+int nvn_vmap_dirty_probe(const void *addr, size_t len, uint64_t stamp);
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) {
     if (!len) return 0;
     range_t *r = find_span((uintptr_t)addr, len);
     if (!r) return 1;   // When untracked, conservatively treat as dirty: better to upload more than to show stale content
     uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
     for (uintptr_t i = p; i <= q; i++) if (atomic_load(&r->gen[i]) > stamp) return 1;   // The generation of the last write before upload is <= the stamp; any later write must be > the stamp
-    return 0;
+    return nvn_vmap_dirty_probe(addr, len, stamp);
 }
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     int n = atomic_load(&g_nr), active = 0;

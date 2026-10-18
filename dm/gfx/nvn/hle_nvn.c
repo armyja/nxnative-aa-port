@@ -20,6 +20,9 @@
 #include <CommonCrypto/CommonDigest.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
+#include <sys/mman.h>
+#include <mach/mach_vm.h>
+#include <pthread.h>
 #include <TargetConditionals.h>
 #include <unistd.h>
 #if TARGET_OS_OSX
@@ -159,6 +162,47 @@ NVN(nvnDeviceSetDepthMode, void, NVNdevice *d, NVNdepthMode m) { ((dev_t_ *)d)->
 NVN(nvnDeviceFinalizeCommandHandle, void, NVNdevice *d, NVNcommandHandle h) { (void)d; (void)h; }
 
 // ---------- Memory pools ----------
+// Virtual pools (flags 0x200) have no storage of their own; MapVirtual fills them from physical pools. The host reserves the pool's whole address
+// range and, for every mapping, copies the physical range into the reservation and registers that range as its own Metal buffer. Page-granular
+// aliasing (Mach vm_remap) is not usable here: physical pools are not 16 KB-aligned (their bases are offsets inside the guest heap, e.g. ...0x258),
+// so an alias would shift every mapping by that misalignment. The copy keeps every resource inside the virtual pool at the address the game expects;
+// the previous shortcut (point the whole pool at the first mapping's physical base) was only correct for one mapping and made everything else alias
+// the wrong memory (RE Engine's 64 GB pool maps 4 MB chunks from dozens of physical pools).
+typedef struct { uint8_t *mem; uint64_t size; const pool_t *pool; } vres_ent;
+static vres_ent g_vres[32]; static int g_nvres;
+static pthread_mutex_t g_vres_mu = PTHREAD_MUTEX_INITIALIZER;
+typedef struct { const pool_t *pool; uint8_t *vaddr; uint64_t size; uint8_t *phys; uint64_t poff; int alias; } vmap_ent;
+static vmap_ent *g_vmap; static int g_nvmap, g_cvmap;
+static pthread_mutex_t g_vmap_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static uint8_t *vres_take(const pool_t *pool, uint64_t size) {
+    void *m = mmap(NULL, (size_t)size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+    if (m == MAP_FAILED) return NULL;
+    pthread_mutex_lock(&g_vres_mu);
+    if (g_nvres < (int)(sizeof g_vres / sizeof *g_vres)) g_vres[g_nvres++] = (vres_ent){(uint8_t *)m, size, pool};
+    pthread_mutex_unlock(&g_vres_mu);
+    return (uint8_t *)m;
+}
+// Drop every mapping that overlaps [lo, hi): keep the physical donor in step (a later remap onto the same pool must see the GPU's writes) unless
+// `copy_back` is off (pool teardown; the physical pools may already be gone), then unregister the range's Metal buffer and dirty pages
+// Mach page aliasing: maps the physical pages at dst as well, so the engine's writes through the physical pool address are visible at the virtual
+// address (RE Engine fills a texture's 4 MB physical chunks after the virtual pool has mapped them -- a copy at mapping time reads zeros).
+static int vmap_alias(uint8_t *dst, uint8_t *src, uint64_t n) {
+    vm_address_t d = (vm_address_t)dst; vm_size_t sz = (vm_size_t)n; vm_prot_t cur = 0, max = 0;
+    kern_return_t kr = vm_remap(mach_task_self(), &d, sz, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(), (vm_address_t)src, FALSE, &cur, &max, VM_INHERIT_NONE);
+    return kr == KERN_SUCCESS && d == (vm_address_t)dst;
+}
+static void vmap_drop_locked(uint8_t *lo, uint8_t *hi, int copy_back) {
+    for (int i = 0; i < g_nvmap; ) {
+        vmap_ent *e = &g_vmap[i];
+        if (e->vaddr < hi && e->vaddr + e->size > lo) {
+            if (copy_back && e->phys && !e->alias) memcpy(e->phys, e->vaddr, (size_t)e->size);
+            nvn_dirty_remove_range(e->vaddr); mtl_pool_del(e->vaddr);
+            *e = g_vmap[--g_nvmap];
+        } else i++;
+    }
+}
+
 NVN(nvnMemoryPoolBuilderSetDefaults, void, NVNmemoryPoolBuilder *b) { memset(b, 0, sizeof(pool_builder_t)); }
 NVN(nvnMemoryPoolBuilderSetDevice, void, NVNmemoryPoolBuilder *b, NVNdevice *d) { ((pool_builder_t *)b)->dev = d; }
 NVN(nvnMemoryPoolBuilderSetStorage, void, NVNmemoryPoolBuilder *b, void *m, size_t n) { ((pool_builder_t *)b)->mem = m; ((pool_builder_t *)b)->size = n; }
@@ -166,14 +210,29 @@ NVN(nvnMemoryPoolBuilderSetFlags, void, NVNmemoryPoolBuilder *b, int f) { ((pool
 NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
     const pool_builder_t *s = (const pool_builder_t *)b; pool_t *o = (pool_t *)p;
     o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size;
-    if (o->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
+    if (!o->mem && (o->flags & 0x200) && o->size) {   // virtual pool: own address reservation (zero pages; mappings copy the physical content in)
+        o->mem = vres_take(o, o->size);
+        if (o->mem) LOG("[nvn] 虚拟池 %p：预留 %#llx 字节地址 %p（%s）", (void *)o, (unsigned long long)o->size, (void *)o->mem, "映射按物理池内容填充");
+        else LOG("【红】虚拟池 %p：预留 %#llx 字节地址失败，退回单基址近似", (void *)o, (unsigned long long)o->size);
+    }
+    if (o->mem && s->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
     if (!o->mem && !(o->flags & 0x200)) LOG("【红】MemoryPoolInitialize 非虚拟池没有存储 flags=%#x size=%#llx", o->flags, o->size);
     if (getenv("DM_NVN_VLOG")) { LOG("[nvn] MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, (unsigned long long)o->size, o->flags); void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0)); }
     OLOG("MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, o->size, o->flags);
     return 1;
 }
-NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) { if (((pool_t *)p)->mem && !(((pool_t *)p)->flags & 0x200)) {   // A virtual pool's storage is borrowed from a physical pool; do not unregister it
- nvn_dirty_remove_range(((pool_t *)p)->mem); mtl_pool_del(((pool_t *)p)->mem); } mtl_alias_drop_pool(p); ((pool_t *)p)->magic = 0; }
+NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) {
+    pool_t *o = (pool_t *)p;
+    if (o->mem && !(o->flags & 0x200)) {   // physical pool: unregister its storage
+        nvn_dirty_remove_range(o->mem); mtl_pool_del(o->mem);
+    } else if ((o->flags & 0x200) && o->mem) {         // virtual pool: drop its mappings and the reservation
+        pthread_mutex_lock(&g_vmap_mu); vmap_drop_locked(o->mem, o->mem + o->size, 0); pthread_mutex_unlock(&g_vmap_mu);
+        pthread_mutex_lock(&g_vres_mu);
+        for (int i = 0; i < g_nvres; i++) if (g_vres[i].pool == o) { munmap(g_vres[i].mem, (size_t)g_vres[i].size); g_vres[i] = g_vres[--g_nvres]; break; }
+        pthread_mutex_unlock(&g_vres_mu);
+    }
+    mtl_alias_drop_pool(p); o->magic = 0;
+}
 NVN(nvnMemoryPoolFlushMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, size_t n) { (void)p; (void)off; (void)n; }
 NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) { return (NVNbufferAddress)((const pool_t *)p)->mem; }
 
@@ -182,12 +241,20 @@ NVN(nvnTexturePoolInitialize, NVNboolean, NVNtexturePool *tp, const NVNmemoryPoo
     *(dpool_t *)tp = (dpool_t){(const pool_t *)p, off, n}; OLOG("TexturePool n=%d", n); mtl_set_tex_pool_n(n); return 1;
 }
 NVN(nvnTexturePoolFinalize, void, NVNtexturePool *tp) { (void)tp; }
-NVN(nvnTexturePoolRegisterTexture, void, const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v) { (void)tp; mtl_reg_tex(id, (const tex_t *)t, (const view_t *)v); }
+NVN(nvnTexturePoolRegisterTexture, void, const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v) { (void)tp;
+    if (getenv("DM_NVN_BINDLOG")) { static int n; if (n++ < 512) LOG("[bind] reg tex id=%d", id); }
+    mtl_reg_tex(id, (const tex_t *)t, (const view_t *)v); }
+// Image registration (NVN 53+; textures and images share the id space, so the same table serves GetImageHandle / BindImage)
+NVN(nvnTexturePoolRegisterImage, void, const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v) { (void)tp;
+    if (getenv("DM_NVN_BINDLOG")) { static int n; if (n++ < 512) LOG("[bind] reg img id=%d", id); }
+    mtl_reg_tex(id, (const tex_t *)t, (const view_t *)v); }
 NVN(nvnSamplerPoolInitialize, NVNboolean, NVNsamplerPool *sp, const NVNmemoryPool *p, ptrdiff_t off, int n) {
     *(dpool_t *)sp = (dpool_t){(const pool_t *)p, off, n}; OLOG("SamplerPool n=%d", n); return 1;
 }
 NVN(nvnSamplerPoolFinalize, void, NVNsamplerPool *sp) { (void)sp; }
-NVN(nvnSamplerPoolRegisterSampler, void, const NVNsamplerPool *sp, int id, const NVNsampler *s) { (void)sp; mtl_reg_samp(id, &((const samp_t *)s)->p); }
+NVN(nvnSamplerPoolRegisterSampler, void, const NVNsamplerPool *sp, int id, const NVNsampler *s) { (void)sp;
+    if (getenv("DM_NVN_BINDLOG")) { static int n; if (n++ < 512) LOG("[bind] reg samp id=%d", id); }
+    mtl_reg_samp(id, &((const samp_t *)s)->p); }
 
 // ---------- Textures ----------
 #define TB(b) ((tex_builder_t *)(b))
@@ -696,6 +763,13 @@ NVN(nvnCommandBufferBindStorageBuffers, void, NVNcommandBuffer *c, NVNshaderStag
 }
 static p_bind_handles *bind_handles(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h) {
     if (n < 0 || n > 32) { LOG("【红】绑定句柄数 %d", n); return NULL; }
+    if (getenv("DM_NVN_BINDLOG")) {   // 一次性诊断：每种 (op, 阶段, 首槽, 句柄) 只打印一次，用来看游戏把哪些贴图绑在哪些槽 | one-shot diagnostic: print each distinct (op, stage, first, handle) once
+        static struct { int op, st, first; uint64_t h; } seen[1024]; static int nseen;
+        int dup = 0;
+        for (int i = 0; i < nseen; i++) if (seen[i].op == op && seen[i].st == st && seen[i].first == first && seen[i].h == h[0]) { dup = 1; break; }
+        if (!dup && nseen < 1024) { seen[nseen].op = op; seen[nseen].st = st; seen[nseen].first = first; seen[nseen].h = h[0]; nseen++;
+            LOG("[bind] op=%d st=%d first=%d n=%d h=%#llx", op, st, first, n, (unsigned long long)h[0]); }
+    }
     p_bind_handles *r = RECN(c, op, p_bind_handles, h, n); r->stage = st; r->first = first; r->n = n; r->defer = 0; r->src = 0; memcpy(r->h, h, 8 * n);
     return r;
 }
@@ -813,6 +887,9 @@ NVN(nvnVertexAttribStateSetStreamIndex, void, NVNvertexAttribState *s, int i) { 
 NVN(nvnVertexStreamStateSetDefaults, void, NVNvertexStreamState *s) { *ST(vs_st, s) = (vs_st){0, 0}; }
 NVN(nvnVertexStreamStateSetStride, void, NVNvertexStreamState *s, ptrdiff_t st) { ST(vs_st, s)->stride = (uint32_t)st; }
 NVN(nvnVertexStreamStateSetDivisor, void, NVNvertexStreamState *s, int d) { ST(vs_st, s)->divisor = d; }
+// Getters (RE Engine queries its own stream states while building vertex layouts; a red stub returning 0 gave every glyph quad the same vertex offset and the boot text came out garbled)
+NVN(nvnVertexStreamStateGetStride, ptrdiff_t, const NVNvertexStreamState *s) { return (ptrdiff_t)ST(vs_st, s)->stride; }
+NVN(nvnVertexStreamStateGetDivisor, int, const NVNvertexStreamState *s) { return ST(vs_st, s)->divisor; }
 
 static _Atomic uint64_t g_sub_wall_ns, g_sub_cpu_ns, g_sub_instr;   // Wall clock / this thread's CPU time / this thread's retired instruction count for submit (excluding present) (taken away per frame)
 static _Atomic uint64_t g_cum_sub_instr, g_cum_sub_cpu_ns;   // Cumulative versions of the above (the 「翻译」(translation) summary row every 300 frames takes the difference; on a real device read through the log port: instructions per draw / submit CPU per frame)
@@ -1198,6 +1275,17 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         static int lag_n = -1, lag_ms; if (lag_n < 0) { const char *e = getenv("DM_TEST_PRESENT_LAG"); lag_n = 0; if (e && sscanf(e, "%d,%d", &lag_n, &lag_ms) == 2 && lag_n > 0) LOG("DM_TEST_PRESENT_LAG：每 %d 次出图多睡 %d ms", lag_n, lag_ms); else lag_n = 0; }
         if (lag_n && o->presents % lag_n == 0) usleep((useconds_t)lag_ms * 1000);
     }
+    if (getenv("DM_VMAP_REFRESH")) { void nvn_vmap_refresh(void); nvn_vmap_refresh(); }
+    {   // Diagnostic DM_TEXDUMP_MEM=serial:path[:present]: dump that texture's guest storage once, on the given present (default 500)
+        static int tid = -2, done; static long at = 500; static char path[512];
+        if (tid == -2) { const char *e = getenv("DM_TEXDUMP_MEM"); tid = -1; if (e) { char p2[512]; int n = sscanf(e, "%d:%511[^:]:%ld", &tid, p2, &at); if (n >= 2) { snprintf(path, sizeof path, "%s", p2); } else tid = -1; } }
+        if (tid >= 0 && !done && (long)o->presents >= at) { void mtl_dump_tex_mem(int, const char *); mtl_dump_tex_mem(tid, path); done = 1; }
+    }
+    {   // Diagnostic DM_TEXWATCH=<hex pool offset>: every 60 presents report that texture's storage non-zero count
+        static uint64_t woff = 1; static int init;
+        if (!init) { init = 1; const char *e = getenv("DM_TEXWATCH"); woff = e ? strtoull(e, NULL, 16) : 0; }
+        if (woff) { void mtl_watch_tex(uint64_t); mtl_watch_tex(woff); }
+    }
     gfx_enter();
     uint64_t t0 = now_ns();
     if (idx >= 0 && idx < o->ntex && idx < 4) o->ticket[idx] = mtl_present(CTX(o->tex[idx]), present_period(o) / 1e9, o->crop);   // enqueue only, return immediately
@@ -1344,23 +1432,87 @@ NVN(nvnSamplerPoolSetDebugLabel, void, NVNsamplerPool *p, const char *s) { (void
 NVN(nvnQueueSetDebugLabel, void, NVNqueue *q, const char *s) { (void)q; (void)s; }
 NVN(nvnProgramSetDebugLabel, void, NVNprogram *p, const char *s) { (void)p; (void)s; }
 // Virtual pool (flags 0x200): a GPU address range with no storage; MapVirtual maps pages of physical pools into it. A request is 0x28 bytes: {physical pool, physical offset, virtual offset, size, storage class}.
-// Host approach: if every request can be described by one "base" (same physical pool, same physical offset - virtual offset), the virtual pool's storage points straight at that memory of the physical pool -- the same semantics as one set of physical pages on the real device,
-//   and buffer addresses / Metal buffer lookups land on the block the physical pool already registered. SMBW has a single 128 MB virtual pool, mapped whole by one request onto one physical pool at offset 0.
-//   Inconsistent mappings (true sparse) are not implemented: reported red, returns failure. It used to always fail: the game treated the pool as unusable, a buffer later carved from it got a null pool, and MemoryPoolGetFlags read NULL+4 and crashed
+// The pool owns an address reservation (memory-pool section): every mapping copies the physical range into it and registers that range as its own
+// Metal buffer, so a resource at any virtual offset reads its real storage. A null physical pool unmaps (zero pages, donor kept in step).
 typedef struct { NVNmemoryPool *phys; int64_t poff, voff; uint64_t size; int32_t storage_class, _pad; } map_req;
 _Static_assert(sizeof(map_req) == 0x28, "NVNmappingRequest");
+// Debug (DM_VMAP_REFRESH): re-copy every mapping from its physical donor on each present. Used to test whether the game writes the physical pools
+// after they are mapped into a virtual pool (if the black background then appears, the engine uploads through the physical side, not the virtual one).
+// Dirty-tracking hook (nvn_dirty.c): translate a virtual-pool address to its aliased physical donor and check that range's write generations too
+int nvn_vmap_dirty_probe(const void *addr, size_t len, uint64_t stamp) {
+    int hit = 0;
+    pthread_mutex_lock(&g_vmap_mu);
+    for (int i = 0; i < g_nvmap && !hit; i++) {
+        vmap_ent *e = &g_vmap[i];
+        if ((const uint8_t *)addr >= e->vaddr && (const uint8_t *)addr < e->vaddr + e->size)
+            hit = nvn_dirty_since(e->phys + ((const uint8_t *)addr - e->vaddr), len, stamp);
+    }
+    pthread_mutex_unlock(&g_vmap_mu);
+    return hit;
+}
+// DM_TEXDUMP_MEM companion: report the mapping that covers p, and how much of its virtual / physical sides is non-zero (sampled per 4 KB page)
+void nvn_vmap_probe(const void *p, uint64_t n) {
+    pthread_mutex_lock(&g_vmap_mu);
+    for (int i = 0; i < g_nvmap; i++) {
+        vmap_ent *e = &g_vmap[i];
+        if ((const uint8_t *)p >= e->vaddr && (const uint8_t *)p < e->vaddr + e->size) {
+            uint64_t nzv = 0, nzp = 0;
+            for (uint64_t k = 0; k + 16 < n && k < e->size; k += 4096) {
+                int a = 0, b = 0;
+                for (int q = 0; q < 16; q++) { a |= e->vaddr[k + q] != 0; b |= e->phys[k + q] != 0; }
+                nzv += a; nzp += b;
+            }
+            LOG("[vmap] 探针 %p：映射 #%d 虚拟 %p 物理 %p poff=%#llx size=%#llx；虚拟非零页 %llu、物理非零页 %llu（抽样）", p, i, (void *)e->vaddr, (void *)e->phys, (unsigned long long)e->poff, (unsigned long long)e->size, (unsigned long long)nzv, (unsigned long long)nzp);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_vmap_mu);
+}
+void nvn_vmap_refresh(void) {
+    static int logged, cnt; uint64_t nz = 0, nzv = 0, tot = 0;
+    pthread_mutex_lock(&g_vmap_mu);
+    for (int i = 0; i < g_nvmap; i++) {
+        vmap_ent *e = &g_vmap[i]; if (!e->phys) continue;
+        if (!logged && cnt > 300) for (uint64_t k = 0; k < e->size; k += 4096) { int n = 0, nv = 0; for (int q = 0; q < 16 && k + q < e->size; q++) { n |= e->phys[k + q] != 0; nv |= e->vaddr[k + q] != 0; } nz += n; nzv += nv; tot++; }
+        memcpy(e->vaddr, e->phys, (size_t)e->size);
+    }
+    pthread_mutex_unlock(&g_vmap_mu);
+    cnt++;
+    if (!logged && tot) { logged = 1; LOG("[vmap] 第 %d 次出图：%d 个映射，物理侧非零页 %llu/%llu，虚拟侧非零页 %llu/%llu", cnt, g_nvmap, (unsigned long long)nz, (unsigned long long)tot, (unsigned long long)nzv, (unsigned long long)tot); }
+}
 NVN(nvnMemoryPoolMapVirtual, NVNboolean, NVNmemoryPool *p, int n, const NVNmappingRequest *rq) {
     pool_t *o = (pool_t *)p; const map_req *r = (const map_req *)rq;
+    if (!o->mem || !(o->flags & 0x200)) { LOG("【红】MapVirtual：%p 不是有地址保留的虚拟池", (void *)o); return 0; }
+    pthread_mutex_lock(&g_vmap_mu);
     for (int i = 0; i < n; i++) {
         const pool_t *ph = (const pool_t *)r[i].phys;
-        if (!ph) continue;   // Unmapping (null physical pool): the host keeps the storage as is
-        if (!ph->mem) { LOG("【红】MapVirtual：物理池 %p 没有存储", (const void *)ph); return 0; }
-        uint8_t *base = ph->mem + r[i].poff - r[i].voff;
-        if (r[i].voff < 0 || (uint64_t)r[i].voff + r[i].size > o->size || (uint64_t)r[i].poff + r[i].size > ph->size) { LOG("【红】MapVirtual：请求越界（虚拟 %#llx+%#llx / 池 %#llx，物理 %#llx / 池 %#llx）", (unsigned long long)r[i].voff, (unsigned long long)r[i].size, (unsigned long long)o->size, (unsigned long long)r[i].poff, (unsigned long long)ph->size); return 0; }
-        if (o->mem && o->mem != base) { LOG("【红】MapVirtual：映射不连续（真稀疏）未实现：虚拟池 %p 已对 %p，本条要 %p", (void *)o, (void *)o->mem, (void *)base); return 0; }
-        if (!o->mem) LOG("[nvn] MapVirtual：虚拟池 %p（%#llx 字节）的存储指向物理池 %p + %#llx", (void *)o, (unsigned long long)o->size, (const void *)ph, (unsigned long long)(r[i].poff - r[i].voff));
-        o->mem = base;
+        if (getenv("DM_NVN_VMAPLOG")) LOG("[vmap] pool=%p voff=%#llx size=%#llx phys=%p poff=%#llx phys_size=%#llx", (void *)o, (unsigned long long)r[i].voff, (unsigned long long)r[i].size, (const void *)ph, (unsigned long long)r[i].poff, ph ? (unsigned long long)ph->size : 0ull);
+        if (r[i].size == 0 || r[i].voff < 0 || (uint64_t)r[i].voff + r[i].size > o->size ||
+            (ph && ((uint64_t)r[i].poff + r[i].size > ph->size || !ph->mem))) {
+            LOG("【红】MapVirtual：请求越界（虚拟 %#llx+%#llx / 池 %#llx，物理 %#llx / 池 %#llx）", (unsigned long long)r[i].voff, (unsigned long long)r[i].size,
+                (unsigned long long)o->size, (unsigned long long)r[i].poff, ph ? (unsigned long long)ph->size : 0ull);
+            pthread_mutex_unlock(&g_vmap_mu); return 0;
+        }
+        uint8_t *vdst = o->mem + r[i].voff;
+        vmap_drop_locked(vdst, vdst + r[i].size, 1);   // replacing an existing mapping: flush it back to its donor first
+        if (!ph) {   // unmap: fresh zero pages, so a stale read does not see the old content
+            if (mmap(vdst, (size_t)r[i].size, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0) == MAP_FAILED)
+                LOG("【红】MapVirtual：解映射清零失败 %p+%#llx", (void *)vdst, (unsigned long long)r[i].size);
+            continue;
+        }
+        uint8_t *src = ph->mem + r[i].poff;
+        size_t pg = (size_t)getpagesize();
+        int alias = 0;
+        if (((uintptr_t)src % pg) == 0 && ((uintptr_t)vdst % pg) == 0 && (r[i].size % pg) == 0) alias = vmap_alias(vdst, src, r[i].size);
+        if (!alias) memcpy(vdst, src, (size_t)r[i].size);   // fallback: unaligned pool / vm_remap refused -> private copy
+        { static int na, nc; if (alias && na++ < 3) LOG("[vmap] 别名映射（vm_remap）%p ← %p %#llx", (void *)vdst, (void *)src, (unsigned long long)r[i].size);
+          else if (!alias && nc++ < 3) LOG("[vmap] 复制映射（地址不齐/别名失败）%p ← %p %#llx", (void *)vdst, (void *)src, (unsigned long long)r[i].size); }
+        if (g_nvmap == g_cvmap) { g_cvmap = g_cvmap ? g_cvmap * 2 : 64; g_vmap = realloc(g_vmap, (size_t)g_cvmap * sizeof *g_vmap); }
+        g_vmap[g_nvmap++] = (vmap_ent){o, vdst, r[i].size, src, (uint64_t)r[i].poff, alias};
+        mtl_pool_add(vdst, r[i].size);
+        nvn_dirty_add_range(vdst, r[i].size);
     }
+    pthread_mutex_unlock(&g_vmap_mu);
     return 1;
 }
 
@@ -1418,6 +1570,9 @@ NVN(nvnColorStateSetLogicOp, void, NVNcolorState *s, NVNlogicOp op) { ST(color_s
 
 // Device: combined texture handle = texture id | sampler id << 20 (same encoding as the separate handles)
 NVN(nvnDeviceGetTextureHandle, NVNtextureHandle, const NVNdevice *d, int tex, int samp) { (void)d; return (NVNtextureHandle)((uint64_t)(uint32_t)tex | (uint64_t)(uint32_t)samp << 20); }
+// Texel-fetch handle: RE Engine asks for one per texture (x1 = the texture id it registered) and writes it into its own uniform buffers;
+// returning the registration id keeps the replay layer's dynamic-handle path (NVN_RB_TEXU, texture id = handle & 0xfffff) working
+NVN(nvnDeviceGetTexelFetchHandle, NVNtextureHandle, const NVNdevice *d, int id) { (void)d; return (NVNtextureHandle)(uint64_t)(uint32_t)id; }
 // Counter timestamps are 19.2 MHz GPU ticks (nvn_mtl.m gpu_ticks: ns × 12 / 625); convert back to ns. They used to be returned as is, about 52 times smaller than GetCurrentTimestampInNanoseconds, so subtracting one from the other gave garbage
 NVN(nvnDeviceGetTimestampInNanoseconds, uint64_t, const NVNdevice *d, const NVNcounterData *c) { (void)d; return c->timestamp * 625 / 12; }
 // Current GPU time (ns): the same clock as the counter timestamps -- the guest clock (guest_ns, nvn_mtl.m gpu_ticks)
