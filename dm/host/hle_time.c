@@ -31,6 +31,7 @@ HLE_FORCE("time", "按返回点认出建局种子那一处（DM_FIXED_TIME）；
         else if (fixed_time() >= 0) LOG("【红】DM_FIXED_TIME：main 0x3509a0 不是预期的 bl time（%#x），建局 time() 未固定", w);
         sdk_time = (int64_t (*)(int64_t *))f;
     }
+    if (getenv("DM_TIME_WALL")) { int64_t w = (int64_t)time(NULL); if (t) *t = w; return w; }   // experiment: wall clock instead of the SDK uptime
     int64_t ft = fixed_time();
     if (ft >= 0 && lr == seed_ret) {
         static int once; if (!once++) LOG("DM_FIXED_TIME：建局 time() 返回 %lld", (long long)ft);
@@ -47,7 +48,9 @@ HLE_FORCE("_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyCl
     memcpy(out, &s, 8); memcpy(out + 8, "dmhost-steady-01", 16); return RES_OK;
 }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "用户时钟 → 宿主 time()", Result, h_time_GetCurrentTime, int64_t *out) {
-    int64_t ft = fixed_time(); *out = ft >= 0 ? ft : time(NULL); return RES_OK;
+    int64_t ft = fixed_time(); *out = ft >= 0 ? ft : time(NULL);
+    if (getenv("DM_TIMELOG")) { static int n; if (n++ < 8) LOG("timelog GetCurrentTime → %lld", (long long)*out); }
+    return RES_OK;
 }
 // Forced Terror Zone for stages 6–10 of the boss rush (set by dm_bossrush.c): when g_dm_tz_time is non-zero and not expired, only the clock reads at the "Terror Zone" sites get it; save timestamps and all other calls are unchanged.
 // Which sites: the return point falls in the cluster starting at the zone function 0x58f1e0 (0x58f1e0–0x591440), or the zone schedule 0x58f310 is called within 8 instructions after the return (server side 0x636b38 applying the zone, 0x694b48 and so on, 9 sites).

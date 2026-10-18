@@ -46,6 +46,25 @@ else:
 # Networking cuts (excluded scope: Battle.net / online play): taken from a community offline fix (LFS Mod Offline Fix for v2228224, which differs from the official 94012 main in only these 7 words).
 # Measured: the system service layer (nifm offline / DNS black hole / account service) cannot get around it: the game itself sends Battle.net requests directly and allows offline play according to the "last online" time.
 CUTS = {
+  # 逆转裁判123 存档/读档修复：DateTime.Now 的"时区差缓存"快路径
+#
+# main+0x960f80 = DateTime.get_Now。它把"当前时间"和缓存基准（DateTime.static+0x70）相减，
+# 差值 ≤60 秒时直接复用缓存里的 boxed TimeSpan（static+0x68），差值更大才重新调用
+# get_CurrentTimeZone + GetLocalTimeDiff 并写缓存。
+#
+# 宿主上 guest 的"当前时间"取到 0（时间源/时区在这条路径上不可用），缓存也是 0，
+# 差值 0 → 走快路径 → 对 null 做 unbox → NullReferenceException。
+# 这个异常会杀死所有要格式化日期的协程：存档协程首跑即死（写不进盘）、
+# 读取列表也建不起来（全部显示"存档不存在"——连 Ryujinx 的原生存档也一样）。
+#
+# 把 0x961018 的 b.gt 改成无条件 b：永远走重算分支，由它填充缓存。
+# 副作用：存档槽的日期显示为 0001/01/01 08:00:00（因为 guest 取到的当前时间就是 0），
+# 但存档/读档数据本身完全正确。
+# 本补丁只改运行期编译出的模块，游戏原始文件不动。
+CUTS = {
+  'c5b5d28842207c47bd0fc97137e5e75f': [
+    (0x961018, '2c010054', '09000014', 'AA 修复：DateTime.Now 强制走时区差重算分支，绕开空缓存导致的空引用', '仅宿主'),
+  ],
   # Super Mario Bros. Wonder v0 main
   'cd6e42aee7934f4d8393cd43893ae25e': [
     # Resource heap slack: each resource unit's ExpHeap is created with the resource size table value + 0x1008 (main+0x1e603c → ExpHeap::create main+0x4aac38); the table holds Nintendo's measured peaks with almost no margin
@@ -790,6 +809,7 @@ elif RULE_RUN:
     stat('private_gates_reserved')
 
 obs = list(OBS.get(BUILD_ID, []))
+if __import__('os').environ.get('PATCH_NO_CUTS'): CUTS = {}   # keep the cuts table empty (A/B comparison of a patch)
 if __import__('os').environ.get('PATCH_NO_OBS'): obs = []   # gate-free build for debugger breakpoints
 if RULE_RUN and PRIVATE_GATES:
     obs.append((0x43ecc8, 6, "b8686953", "private touch-run-v4 PRE-ldr; full800 host ABI"))

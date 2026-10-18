@@ -74,7 +74,7 @@ void aa_host_save_request(void) {
     // coroutine never resumes, so it cannot close itself)
     extern void dm_script_set(uint64_t, int32_t, int32_t, int32_t, int32_t);
     extern uint64_t dm_guest_frame(void);
-    if (!getenv("DM_AA_NO_AUTOB")) { dm_script_set(0x2, 0, 0, 0, 0); g_aa_release_b_at = dm_guest_frame() + 4; }
+    if (getenv("DM_AA_AUTOB")) { dm_script_set(0x2, 0, 0, 0, 0); g_aa_release_b_at = dm_guest_frame() + 4; }   // off by default: the game closes its own dialog now
     // Optional: dismiss the dialog ourselves (the save coroutine that would normally hide it never resumes)
     const char *ce = getenv("DM_AA_AUTOCLOSE");
     if (ce && atoi(ce) && g_aa_save_window) {
@@ -395,7 +395,7 @@ void aa_call_save_probe(void) {
     // DM_AA_AUTOSAVE=<frames after the dialog opens>; unset = on with the default 20 frames for this build (the save
     // UI's coroutine never resumes on the host, so the game's own SaveGameDataRequest is called by the host instead),
     // DM_AA_AUTOSAVE=0 disables it
-    if (autosave_frames == -2) { const char *e = getenv("DM_AA_AUTOSAVE"); autosave_frames = e ? atoi(e) : 20; }
+    if (autosave_frames == -2) { const char *e = getenv("DM_AA_AUTOSAVE"); autosave_frames = e ? atoi(e) : 0; }   // 0 = off: the timezone fix makes the game's own save flow work
     if (autosave_frames > 0) {
         extern uint64_t dm_guest_frame(void);
         static uint64_t last_win;
