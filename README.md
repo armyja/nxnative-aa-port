@@ -61,6 +61,7 @@ How to run them on a Mac (`B` is the build directory the extraction step wrote f
 [FORK-NOTES.md](FORK-NOTES.md)):
 
 ```bash
+cd ~/projects/nxnative                       # repository root (contains dm/ and scripts/)
 B=~/projects/aa123/0100CB000A142000_build
 make -C dm/host GAME=0100CB000A142000 dmhost
 DM_WINDOW=1 DM_AUDIO=1 DM_MSL_DIR="$B/shader_cache" \
