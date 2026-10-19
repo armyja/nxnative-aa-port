@@ -91,6 +91,19 @@ static void *guest_tramp(void *p) {
 // Render scale menu (View menu): the game re-selects its resolution when it pops the notification dm_render_scale_set queues
 static void window_fit(NSWindow *w, double factor);
 static int g_win_sized;   // the window has been sized to the picture (the game renders 1920x1080; 1:1 keeps the text pixel-exact)
+// Keep 16:9 while the user drags the corner: contentAspectRatio alone was not honoured here, the delegate always is
+@interface DMWinDelegate : NSObject <NSWindowDelegate>
+@end
+@implementation DMWinDelegate
+- (NSSize)windowWillResize:(NSWindow *)w toSize:(NSSize)fsz {
+    if (w.styleMask & NSWindowStyleMaskFullScreen) return fsz;
+    NSRect c = [w contentRectForFrameRect:NSMakeRect(0, 0, fsz.width, fsz.height)];
+    if (c.size.width < 64) return fsz;
+    NSRect f = [w frameRectForContentRect:NSMakeRect(0, 0, c.size.width, c.size.width * 9.0 / 16.0)];
+    static int n; if (n++ < 5) LOG("[窗口] 拖拽约束 %.0fx%.0f → %.0fx%.0f", fsz.width, fsz.height, f.size.width, f.size.height);
+    return f.size;
+}
+@end
 @interface DMScaleTarget : NSObject
 - (void)pick:(NSMenuItem *)it;
 @end
@@ -133,7 +146,7 @@ void front_run(void (*guest)(void)) {
                                                       backing:NSBackingStoreBuffered defer:NO];
         win.title = @DM_GAME_NAME;   // the game profile's name (game name label)
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;   // green button = real fullscreen (without this it only zooms)
-        win.contentAspectRatio = NSMakeSize(16, 9);   // dragging the corner keeps 16:9, so the picture is never stretched
+        { static DMWinDelegate *wd; wd = [DMWinDelegate new]; win.delegate = wd; }   // 16:9 while dragging (see windowWillResize)
         // Minimal main menu: without one there is no "Enter Full Screen" item and no Command-Control-F, and Command-Q does not quit
         {
             NSMenu *bar = [[NSMenu alloc] init];
@@ -146,19 +159,6 @@ void front_run(void (*guest)(void)) {
             NSMenuItem *fs = [[NSMenuItem alloc] initWithTitle:@"Toggle Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"];
             fs.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;   // the system's Command-Control-F
             [viewMenu addItem:fs];
-            {   // Window: the game renders at a fixed 1920x1080, so the picture is only pixel-exact while the drawable is 1920x1080 pixels.
-                // "1:1" resizes the window so the drawable matches the picture; anything larger is upscaled (soft).
-                static DMScaleTarget *tgt; tgt = [DMScaleTarget new];
-                NSMenuItem *wItem = [[NSMenuItem alloc] initWithTitle:@"Window Size" action:nil keyEquivalent:@""];
-                NSMenu *wMenu = [[NSMenu alloc] initWithTitle:@"Window Size"];
-                NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:@"1:1 (picture pixels, sharpest)" action:@selector(pick:) keyEquivalent:@""];
-                it.target = tgt; it.representedObject = @(0.0); [wMenu addItem:it];
-                it = [[NSMenuItem alloc] initWithTitle:@"2x (bigger, sharper text)" action:@selector(pick:) keyEquivalent:@""];
-                it.target = tgt; it.representedObject = @(2.0); [wMenu addItem:it];
-                it = [[NSMenuItem alloc] initWithTitle:@"1080p (supersampled: smooth art, crisp text)" action:@selector(pick:) keyEquivalent:@""];
-                it.target = tgt; it.representedObject = @(-1080.0); [wMenu addItem:it];   // negative = fixed 1080p window
-                wItem.submenu = wMenu; [viewMenu addItem:wItem];
-            }
             viewItem.submenu = viewMenu;
             [NSApp setMainMenu:bar];
         }
@@ -213,10 +213,11 @@ void front_run(void (*guest)(void)) {
                     LOG("[窗口] 绿色按钮 → %s全屏", win.styleMask & NSWindowStyleMaskFullScreen ? "退出" : "进入");
                     fs_toggle(win); return nil;
                 }
-                NSRect vf = [v convertRect:v.bounds toView:nil];
-                if (!NSPointInRect(e.locationInWindow, vf)) return e;   // title bar and traffic lights go to AppKit (the close button needs one click)
             }
-            if (e.type == NSEventTypeLeftMouseUp) { dm_touch_set(NULL, 0); return nil; }
+            NSRect vf = [v convertRect:v.bounds toView:nil];
+            BOOL inView = NSPointInRect(e.locationInWindow, vf);
+            if (e.type == NSEventTypeLeftMouseUp) { dm_touch_set(NULL, 0); return inView ? nil : e; }
+            if (!inView) return e;   // title bar, traffic lights and the resize border go to AppKit (swallowing them broke both the close button and live resize)
             NSPoint p = [v convertPoint:e.locationInWindow fromView:nil]; NSSize sz = v.bounds.size;
             if (sz.width <= 0 || sz.height <= 0) return e;
             dm_touch t = {0, (float)(p.x / sz.width), (float)(1.0 - p.y / sz.height)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
