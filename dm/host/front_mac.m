@@ -88,6 +88,13 @@ static void *guest_tramp(void *p) {
     ((guest_arg *)p)->fn(); LOG("客体线程结束"); exit(0);
 }
 
+static int g_fs_guard;   // fullscreen transition in progress: its resign/become-key notifications are not real focus changes
+static void fs_toggle(NSWindow *w) {
+    g_fs_guard = 1;
+    [w toggleFullScreen:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ g_fs_guard = 0; });
+}
+
 void front_run(void (*guest)(void)) {
     if (!getenv("DM_WINDOW")) { guest(); return; }
     @autoreleasepool {
@@ -98,6 +105,22 @@ void front_run(void (*guest)(void)) {
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];
         win.title = @DM_GAME_NAME;   // the game profile's name (game name label)
+        win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;   // green button = real fullscreen (without this it only zooms)
+        // Minimal main menu: without one there is no "Enter Full Screen" item and no Command-Control-F, and Command-Q does not quit
+        {
+            NSMenu *bar = [[NSMenu alloc] init];
+            NSMenuItem *appItem = [[NSMenuItem alloc] init]; [bar addItem:appItem];
+            NSMenu *appMenu = [[NSMenu alloc] init];
+            [appMenu addItemWithTitle:@"Quit" action:@selector(terminate:) keyEquivalent:@"q"];
+            appItem.submenu = appMenu;
+            NSMenuItem *viewItem = [[NSMenuItem alloc] init]; [bar addItem:viewItem];
+            NSMenu *viewMenu = [[NSMenu alloc] init];
+            NSMenuItem *fs = [[NSMenuItem alloc] initWithTitle:@"Toggle Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"];
+            fs.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;   // the system's Command-Control-F
+            [viewMenu addItem:fs];
+            viewItem.submenu = viewMenu;
+            [NSApp setMainMenu:bar];
+        }
         NSView *v = win.contentView;
         v.wantsLayer = YES;
         g_layer = [CAMetalLayer layer];
@@ -108,16 +131,30 @@ void front_run(void (*guest)(void)) {
         [win center];
         [win makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
+        if (getenv("DM_FULLSCREEN")) {   // start in fullscreen (same as the green button)
+            [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:NO block:^(NSTimer *t) { (void)t; fs_toggle(win); }];
+        }
         [GCController startWirelessControllerDiscoveryWithCompletionHandler:nil];
         [NSTimer scheduledTimerWithTimeInterval:1.0 / 120.0 repeats:YES block:^(NSTimer *t) { (void)t; pad_poll(); }];
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
+            if ((e.modifierFlags & NSEventModifierFlagCommand) && !(e.modifierFlags & NSEventModifierFlagControl)) {
+                if (e.keyCode == 3 && e.type == NSEventTypeKeyDown) { fs_toggle(win); return nil; }   // Command-F: fullscreen
+                return e;   // Command-Q / Command-Control-F and the rest of the menu bar keep working
+            }
             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);
             return nil;   // Swallow it to avoid the system beep
         }];
         // Mouse as a single-point touchscreen (for testing touch on the local machine, front.h dm_touch_set): left button down / drag = finger 0 at the normalized coordinates, release = lifted
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;
+            if (e.type == NSEventTypeLeftMouseDown) {   // green button = one click fullscreen (AppKit would open the tiling menu instead)
+                NSButton *zoom = [win standardWindowButton:NSWindowZoomButton];
+                if (zoom && !zoom.hidden && NSPointInRect(e.locationInWindow, [zoom convertRect:zoom.bounds toView:nil])) {
+                    LOG("[窗口] 绿色按钮 → %s全屏", win.styleMask & NSWindowStyleMaskFullScreen ? "退出" : "进入");
+                    fs_toggle(win); return nil;
+                }
+            }
             if (e.type == NSEventTypeLeftMouseUp) { dm_touch_set(NULL, 0); return nil; }
             NSPoint p = [v convertPoint:e.locationInWindow fromView:nil]; NSSize sz = v.bounds.size;
             if (sz.width <= 0 || sz.height <= 0) return e;
@@ -130,9 +167,14 @@ void front_run(void (*guest)(void)) {
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
         // DM_KEEP_FOCUS=1: never report focus loss (Unity pauses its own rendering when it thinks it is in the
         // background -- keeps the game running while the player switches to another app)
-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (!win.miniaturized) dm_focus_set(getenv("DM_KEEP_FOCUS") ? 1 : 2); }];
-        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_focus_set(1); }];
+        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (!g_fs_guard && !win.miniaturized) dm_focus_set(getenv("DM_KEEP_FOCUS") ? 1 : 2); }];
+        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (!g_fs_guard) dm_focus_set(1); }];
         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
+        // Fullscreen: the drawable follows the window, the present path scales the game picture to it keeping 16:9 (black bars)
+        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n;
+            [NSTimer scheduledTimerWithTimeInterval:0.8 repeats:NO block:^(NSTimer *t) { (void)t; CGSize d = g_layer.drawableSize; LOG("[窗口] 进入全屏：画布 %.0fx%.0f（等比放大，多余区域留黑边）", d.width, d.height); }]; }];
+        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n;
+            [NSTimer scheduledTimerWithTimeInterval:0.8 repeats:NO block:^(NSTimer *t) { (void)t; CGSize d = g_layer.drawableSize; LOG("[窗口] 退出全屏：画布 %.0fx%.0f", d.width, d.height); }]; }];
         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
         // Guest thread: 64 MiB stack (the Switch main thread stack is specified by npdm; the host gives plenty)
         static guest_arg ga; ga.fn = guest;
