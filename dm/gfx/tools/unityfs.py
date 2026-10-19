@@ -58,29 +58,29 @@ def bundle_files(d):
 def common_strings(image):
     """Unity's common string table in the game's main → {offset: string}
 
-    Newer players (Unity 2022, e.g. Ace Attorney Investigations Collection) keep the table in place but some entries
-    are patched over, so the exact 'AABB\\0AnimationClip\\0AnimationCurve\\0' prefix no longer matches and the plain
-    NUL-separated walk stops at the first byte that is not printable. Accept the shorter prefix and skip corrupted
-    runs: the table is a byte buffer addressed by offset, so an entry whose text is damaged only loses its name."""
+    Unity 2022 (e.g. Ace Attorney Investigations Collection) keeps the table in place but patches some entries over, so
+    upstream's exact 'AABB\\0AnimationClip\\0AnimationCurve\\0' prefix may not match. Accept the shorter prefix and skip
+    runs that are not printable (a damaged entry only loses its name: offsets into the table stay valid). Bounded."""
     a = image.find(b'AABB\0AnimationClip\0AnimationCurve\0')
     strict = a >= 0
     if a < 0: a = image.find(b'AABB\0AnimationClip')
     if a < 0: raise ValueError('no Unity common string table in main (AABB\\0AnimationClip...)')
-    tab, p, skipped = {}, a, 0
-    while p < len(image) - 4 and len(tab) < 8192:
-        e = image.find(b'\0', p)
+    end = min(len(image), a + (1 << 18))
+    tab, p, damaged = {}, a, 0
+    while p < end - 4 and len(tab) < 8192:
+        if image[p] == 0: p += 1; continue                       # padding between entries
+        e = image.find(b'\0', p, end)
         if e < 0: break
-        s = image[p:e]
-        if s and all(0x20 <= ch < 0x7f for ch in s):
-            tab[p - a] = s.decode(); p = e + 1
-        elif strict:
-            break
-        else:   # damaged entry: move to the next printable run inside it, else past the NUL
+        run = image[p:e]
+        if all(0x20 <= ch < 0x7f for ch in run):
+            tab[p - a] = run.decode(); p = e + 1
+        else:                                                     # damaged: move to the next printable byte
             q = p
             while q < e and not (0x20 <= image[q] < 0x7f): q += 1
             p = q if q < e else e + 1
-            skipped += 1
-    if skipped: print(f'[unityfs] common string table: {len(tab)} entries, {skipped} damaged runs skipped', flush=True)
+            damaged += 1
+            if strict: break
+    if damaged: print(f'[unityfs] common string table: {len(tab)} entries ({damaged} damaged runs skipped)', flush=True)
     return tab
 
 class Node:

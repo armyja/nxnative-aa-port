@@ -480,7 +480,10 @@ def main():
         byrel = {r: p for p, r in files}
         with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts)) as ex: again = list(ex.map(scan_file, [(byrel[r], r) for r in defer]))
         for rel, uniq, pr, extra in again:
-            if extra == 'defer': red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
+            if extra == 'defer':
+                if os.environ.get('DM_SHADER_STRICT'):
+                    red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
+                print(f'[RED] {rel}: 没有类型树、也没有同哈希的 Shader 类型树可借，跳过 | no type tree to borrow, skipped', flush=True)
         results = [r for r in results if r[3] != 'defer'] + again
     per_src = collections.Counter(); pairs = set()
     for rel, uniq, pr, _ in results:
