@@ -1001,6 +1001,15 @@ __attribute__((constructor)) static void nvn_nops_register(void) {
     if (getenv("DM_NVN_PROF"))
         for (unsigned i = 0; i < NVN_NFUNC; i++)
             if (nvn_slot[i].fn != (void *)nvn_unimpl_entry && strcmp(nvn_names[i], "nvnQueuePresentTexture")) { nvn_real[i] = nvn_slot[i].fn; nvn_slot[i].fn = (void *)nvn_prof_entry; }
+    // DM_NVN_GAPLIST=<file>: dump every NVN entry point with its class (impl / noop / stub) so a gap report can join it with the
+    // runtime call table (DM_NVN_TSV) and the game's imported symbols. "stub" entries log a red line and return 0 when called.
+    { const char *e = getenv("DM_NVN_GAPLIST");
+      if (e && *e) { FILE *f = fopen(e, "w");
+        if (f) { fprintf(f, "name\tclass\n");
+            for (unsigned i = 0; i < NVN_NFUNC; i++) { const void *fn = nvn_slot[i].fn;
+                const char *c = fn == (void *)nvn_unimpl_entry ? "stub" : fn == (void *)nvn_nop ? "noop" : "impl";
+                fprintf(f, "%s\t%s\n", nvn_names[i], c); }
+            fclose(f); LOG("[nvn] 缺口清单 → %s", e); } } }
     LOG("[nvn] 空设备：名字 %u，已实现 %u（语义 %u + 空实现 %u，其中 %u 个走宿主大栈），其余 %u 个接报红桩",
         NVN_NFUNC, g_nsem + nnop, g_nsem, nnop, nbig, NVN_NFUNC - g_nsem - nnop);
 }
