@@ -396,6 +396,44 @@ static uint64_t vmap_xlate(uint64_t addr) {
     if (nvn_vmap_host((const void *)(uintptr_t)addr, &h) && h) return (uint64_t)(uintptr_t)h;
     return 0;
 }
+// DM_VMAP_FLAT=1: for addresses inside a run of alias mappings, hand out one buffer covering the whole run instead of the 4 MB mapping that holds the
+// address. The aliased host range is contiguous and backed by the physical pages the engine writes, so the GPU can read across mapping boundaries --
+// which is what the deswizzle kernel needs for textures larger than one mapping (AA456's 3144x3144 pages).
+typedef struct { void *base; uint64_t len; void *buf; } flat_ent;
+static flat_ent g_flat[32]; static int g_nflat;
+// A run can be dropped (the engine unmaps it) and its address space reused: forget any flat buffer that overlaps the dropped range. Buffers still in
+// flight are released after the current submission (defer_obj_release), so the GPU never reads a buffer whose memory has been repurposed.
+void mtl_vmap_flat_drop(void *lo, void *hi) {
+    for (int i = 0; i < g_nflat; ) {
+        uint8_t *bs = (uint8_t *)g_flat[i].base, *be = bs + g_flat[i].len;
+        if (bs < (uint8_t *)hi && be > (uint8_t *)lo) {
+            id<MTLBuffer> b = (__bridge id<MTLBuffer>)g_flat[i].buf;
+            if (b) { defer_obj_release(b); CFRelease(g_flat[i].buf); }
+            g_flat[i] = g_flat[--g_nflat];
+        } else i++;
+    }
+}
+static int mtl_vmap_flat(uint64_t addr, uint64_t need, void **buf, uint64_t *off) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_VMAP_FLAT"); on = !(e && !strcmp(e, "0")); }   // on by default, DM_VMAP_FLAT=0 disables
+    if (!on) return 0;
+    if (need < (4u << 20)) return 0;   // a single mapping (4 MB) covers ordinary bindings: only span-crossing requests need a flat buffer
+    void *st = NULL; uint64_t len = 0; int nvn_vmap_run(const void *, uint64_t, void **, uint64_t *);
+    if (!nvn_vmap_run((const void *)addr, need, &st, &len) || !st) return 0;
+    // Cover just the requested range (page aligned), not the whole run: an 84 MB run would otherwise be accounted in full for an 11 MB upload
+    uint64_t pg = (uint64_t)getpagesize();
+    uint64_t lo = addr & ~(pg - 1), hi = (addr + need + pg - 1) & ~(pg - 1);
+    if (hi > (uint64_t)(uintptr_t)st + len) hi = (uint64_t)(uintptr_t)st + len;
+    if (lo < (uint64_t)(uintptr_t)st) lo = (uint64_t)(uintptr_t)st;
+    st = (void *)(uintptr_t)lo; len = hi - lo;
+    for (int i = 0; i < g_nflat; i++) if (g_flat[i].base == st && g_flat[i].len == len) { *buf = g_flat[i].buf; *off = addr - (uint64_t)(uintptr_t)st; return 1; }
+    if (g_nflat >= 32) return 0;
+    id<MTLBuffer> b = [g_dev newBufferWithBytesNoCopy:st length:(NSUInteger)len options:MTLResourceStorageModeShared deallocator:nil];
+    if (!b) { MLOG("【红】平铺缓冲建不出 %p+%#llx", st, (unsigned long long)len); return 0; }
+    res_add(b);
+    g_flat[g_nflat].base = st; g_flat[g_nflat].len = len; g_flat[g_nflat].buf = (void *)CFBridgingRetain(b); g_nflat++;
+    MLOG("[vmap] 平铺缓冲 %p+%#llx（跨映射，供 GPU 连续读）", st, (unsigned long long)len);
+    *buf = (__bridge void *)b; *off = addr - (uint64_t)(uintptr_t)st; return 1;
+}
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     int ok = 0;
     pthread_mutex_lock(&g_mu);
@@ -1242,7 +1280,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
     { const char *e = getenv("DM_NVN_DESWZ_GPU"); if (e && *e && strcmp(e, "0")) big_cpu = 0; }   // diagnostic: force the GPU deswizzler
     // The GPU deswizzle reads the source as one contiguous MTLBuffer. Virtual-pool textures larger than one mapping (4 MB) span several
     // buffers, so only the first part would be readable and the rest would decode from out-of-bounds memory: check the span and fall back to CPU.
-    int span_ok = 0;
+    int span_ok = 0; void *flat_mb = NULL; uint64_t flat_mo = 0;
     if (g_nvn_deswz_gpu && (!unp || gdec)) {
         uint32_t bw2, bh2, bpb2 = nvn_fmt_bpb(t->d.format, &bw2, &bh2);
         if (bpb2) {
@@ -1257,12 +1295,14 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
                 void *m2; uint64_t o2;
                 span_ok = mtl_addr((uint64_t)t->mem, (uint64_t)t->L.size, &m2, &o2) &&
                           o2 + span <= (uint64_t)((__bridge id<MTLBuffer>)m2).length;
+                if (!span_ok && mtl_vmap_flat((uint64_t)t->mem, span, &m2, &o2)) { flat_mb = m2; flat_mo = o2; span_ok = 1; }
                 if (!span_ok) { static int once; if (!once++) MLOG("解排布：%ux%u 的存储跨度 %llu 超过单个缓冲（%llu，偏移 %#llx），改走 CPU",
                     t->d.width, t->d.height, (unsigned long long)span, (unsigned long long)((__bridge id<MTLBuffer>)m2).length, (unsigned long long)o2); }
             }
         }
     }
-    int use_gpu = (!unp || gdec) && g_nvn_deswz_gpu && !big_cpu && span_ok && mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo);
+    int use_gpu = (!unp || gdec) && g_nvn_deswz_gpu && !big_cpu && span_ok;
+    if (use_gpu) { if (flat_mb) { mb = flat_mb; mo = flat_mo; } else if (!mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo)) use_gpu = 0; }
     if (g_nvn_deswz_gpu && !use_gpu && !unp) RED_ONCE(40, "预排布贴图存储不在内存池里，回退 CPU");
     if (use_gpu) {
         // The GPU reads the memory pool at execution time, which is closer to a real Switch than a snapshot at CPU upload time; the dirty-page stamp is still taken before encoding, and later writes still trigger a re-upload.

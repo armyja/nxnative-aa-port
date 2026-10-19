@@ -192,11 +192,32 @@ static int vmap_alias(uint8_t *dst, uint8_t *src, uint64_t n) {
     kern_return_t kr = vm_remap(mach_task_self(), &d, sz, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(), (vm_address_t)src, FALSE, &cur, &max, VM_INHERIT_NONE);
     return kr == KERN_SUCCESS && d == (vm_address_t)dst;
 }
+// Report the maximal contiguous run of *alias* mappings that contains p and covers [p, p+need): the host address space there is one flat range backed
+// by the aliased physical pages, so the GPU can read it through a single buffer (mtl_vmap_flat). Returns 1 and the run bounds on success.
+int nvn_vmap_run(const void *p, uint64_t need, void **start, uint64_t *len) {
+    int ok = 0;
+    pthread_mutex_lock(&g_vmap_mu);
+    int i;
+    for (i = 0; i < g_nvmap; i++) { const vmap_ent *e = &g_vmap[i]; if ((const uint8_t *)p >= e->vaddr && (const uint8_t *)p < e->vaddr + e->size) break; }
+    if (i < g_nvmap && g_vmap[i].alias) {
+        uint8_t *lo = g_vmap[i].vaddr, *hi = g_vmap[i].vaddr + g_vmap[i].size;
+        int grew = 1, all = 1;
+        while (grew) { grew = 0;
+            for (int k = 0; k < g_nvmap; k++) { const vmap_ent *e = &g_vmap[k];
+                if (e->vaddr + e->size == lo) { if (!e->alias) all = 0; lo = e->vaddr; grew = 1; }
+                else if (e->vaddr == hi) { if (!e->alias) all = 0; hi = e->vaddr + e->size; grew = 1; } } }
+        if (all && (const uint8_t *)p + need <= hi) { *start = lo; *len = (uint64_t)(hi - lo); ok = 1; }
+    }
+    pthread_mutex_unlock(&g_vmap_mu);
+    return ok;
+}
+
 static void vmap_drop_locked(uint8_t *lo, uint8_t *hi, int copy_back) {
     for (int i = 0; i < g_nvmap; ) {
         vmap_ent *e = &g_vmap[i];
         if (e->vaddr < hi && e->vaddr + e->size > lo) {
             if (copy_back && e->phys && !e->alias) memcpy(e->phys, e->vaddr, (size_t)e->size);
+            { void mtl_vmap_flat_drop(void *, void *); mtl_vmap_flat_drop(e->vaddr, e->vaddr + e->size); }
             nvn_dirty_remove_range(e->vaddr); mtl_pool_del(e->vaddr);
             *e = g_vmap[--g_nvmap];
         } else i++;
