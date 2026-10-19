@@ -98,6 +98,9 @@ def header(g):
     bu = g.get('tex_bc_unpack', 'off')   # BC textures created in the decompressed format (the raw compressed upload path mis-decodes some large pages on AA456)
     tu = g.get('tex_upload', 'off')   # block-linear textures in CPU-visible physical pools that the game fills itself get a one-shot upload (no packaged data, no CPU-write hook): on / off
     if tu not in ('on', 'off'): sys.exit(f'{g.id}: tex_upload 只能是 on / off | tex_upload must be on or off: {tu}')
+    rs = g.get('render_scale', '1.0')   # multiplies the resolution the game renders at (1.0 = the game's own; 1.6 = 2560x1440 on a 1600x900 game); DM_RENDER_SCALE overrides
+    if not re.fullmatch(r'[0-9]+(\.[0-9]+)?', rs) or not (0.25 <= float(rs) <= 4.0):
+        sys.exit(f'{g.id}: render_scale 要写 0.25–4.0 的小数 | render_scale must be a number between 0.25 and 4.0: {rs}')
     us = g.get('ub_stage', 'off')   # DM_UB_STAGE default: bind each UpdateUniformBuffer's staged copy instead of blitting it into the guest buffer (keeps render passes open): on / off
     if us not in ('on', 'off'): sys.exit(f'{g.id}: ub_stage 只能是 on / off | ub_stage must be on or off: {us}')
     if pl not in ('simple', 'full'): sys.exit(f'{g.id}: pad_layout 只能是 simple / full | pad_layout must be simple or full: {pl}')
@@ -132,6 +135,7 @@ def header(g):
          f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}',
          f'#define DM_GAME_TEX_UPLOAD_ALL {int(tu == "on")}',
          f'#define DM_GAME_UB_STAGE {int(us == "on")}',
+         f'#define DM_GAME_RENDER_SCALE {float(rs):.4f}',
          f'#define DM_GAME_TEX_BC_UNPACK {int(bu == "on")}',
          f'#define DM_GAME_DESWZ_CPU_MIN {int(dz)}',
          f'#define DM_GAME_PAD_FULL {int(pl == "full")}',

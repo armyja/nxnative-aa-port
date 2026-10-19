@@ -6412,6 +6412,8 @@ static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
 static id<MTLSamplerState> g_blit_samp;
 static uint64_t g_present_n;
 uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present count (heat attribution DM_HEAT computes the present frame rate)
+static _Atomic int g_pic_w, g_pic_h;   // size of the picture the game presents (= its render resolution); the Mac front end sizes the window to it for 1:1
+int mtl_pic_size(int *w, int *h) { int a = atomic_load(&g_pic_w), b = atomic_load(&g_pic_h); if (w) *w = a; if (h) *h = b; return a > 0 && b > 0; }
 void mtl_res_snapshot(mtl_res_count *out) {
     memset(out, 0, sizeof *out);
     out->pso = g_pso.n;
@@ -7147,6 +7149,8 @@ void mtl_link_pause(int on);
 // (hle_nvn.c nvnWindowAcquireTexture -> mtl_present_wait). Without clearing, the game cannot advance a single tick during those 2.5 seconds of waiting for the save, and the save is not written (the same pattern three times in player logs: 3 frames queued, 0 submits)
 void mtl_present_discard(int on) { atomic_store(&g_present_discard, on != 0); if (on) present_drop_for_suspend(); }
 uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
+    if (t) { atomic_store(&g_pic_w, (int)t->d.width); atomic_store(&g_pic_h, (int)t->d.height);
+        { static int once; if (!once++) MLOG("[出图] 画面 %ux%u（窗口 1:1 按它定尺寸）", t->d.width, t->d.height); } }   // the game's render resolution (see mtl_pic_size)
     if (atomic_load(&g_present_discard)) return 0;   // Ticket number 0 = no pending present; the swapchain texture acquire does not wait
     if (t) { xv_check(t->serial, 0, 0, "出图"); if (g_xv_npresent < 128) g_xv_present[g_xv_npresent++] = t->serial; }
     static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, present_start);

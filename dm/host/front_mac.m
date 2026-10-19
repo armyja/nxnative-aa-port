@@ -88,7 +88,33 @@ static void *guest_tramp(void *p) {
     ((guest_arg *)p)->fn(); LOG("客体线程结束"); exit(0);
 }
 
+// Render scale menu (View menu): the game re-selects its resolution when it pops the notification dm_render_scale_set queues
+static void window_fit(NSWindow *w, double factor);
+static int g_win_sized;   // the window has been sized to the picture (the game renders 1920x1080; 1:1 keeps the text pixel-exact)
+@interface DMScaleTarget : NSObject
+- (void)pick:(NSMenuItem *)it;
+@end
+@implementation DMScaleTarget
+- (void)pick:(NSMenuItem *)it {
+    NSWindow *w = NSApp.windows.count ? NSApp.windows[0] : nil; if (!w) return;
+    void window_fit(NSWindow *w, double factor); g_win_sized = 1;
+    window_fit(w, [it.representedObject doubleValue]);   // 0 = 1:1
+}
+@end
+
 static int g_fs_guard;   // fullscreen transition in progress: its resign/become-key notifications are not real focus changes
+// Size the window so the drawable is picture x factor pixels (0 = 1:1). Called from the 120 Hz timer until the picture size is known.
+static void window_fit(NSWindow *w, double factor) {
+    int pw = 0, ph = 0; int mtl_pic_size(int *w, int *h);
+    if (!mtl_pic_size(&pw, &ph)) return;
+    double sc = w.backingScaleFactor > 0 ? w.backingScaleFactor : 1.0;
+    if (factor <= 0) factor = 1.0;
+    NSSize want = NSMakeSize(pw * factor / sc, ph * factor / sc);
+    NSRect c = [w contentRectForFrameRect:w.frame];
+    NSRect nf = [w frameRectForContentRect:NSMakeRect(c.origin.x, c.origin.y, want.width, want.height)];
+    [w setFrame:nf display:YES];
+    LOG("[窗口] 内容 %.0fx%.0f 点（画布 %.0fx%.0f 像素），游戏画面 %dx%d", want.width, want.height, want.width * sc, want.height * sc, pw, ph);
+}
 static void fs_toggle(NSWindow *w) {
     g_fs_guard = 1;
     [w toggleFullScreen:nil];
@@ -118,6 +144,17 @@ void front_run(void (*guest)(void)) {
             NSMenuItem *fs = [[NSMenuItem alloc] initWithTitle:@"Toggle Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"];
             fs.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;   // the system's Command-Control-F
             [viewMenu addItem:fs];
+            {   // Window: the game renders at a fixed 1920x1080, so the picture is only pixel-exact while the drawable is 1920x1080 pixels.
+                // "1:1" resizes the window so the drawable matches the picture; anything larger is upscaled (soft).
+                static DMScaleTarget *tgt; tgt = [DMScaleTarget new];
+                NSMenuItem *wItem = [[NSMenuItem alloc] initWithTitle:@"Window Size" action:nil keyEquivalent:@""];
+                NSMenu *wMenu = [[NSMenu alloc] initWithTitle:@"Window Size"];
+                NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:@"1:1 (picture pixels, sharpest)" action:@selector(pick:) keyEquivalent:@""];
+                it.target = tgt; it.representedObject = @(0.0); [wMenu addItem:it];
+                it = [[NSMenuItem alloc] initWithTitle:@"2x (supersampled, soft)" action:@selector(pick:) keyEquivalent:@""];
+                it.target = tgt; it.representedObject = @(2.0); [wMenu addItem:it];
+                wItem.submenu = wMenu; [viewMenu addItem:wItem];
+            }
             viewItem.submenu = viewMenu;
             [NSApp setMainMenu:bar];
         }
@@ -130,12 +167,30 @@ void front_run(void (*guest)(void)) {
         v.layer = g_layer;
         [win center];
         [win makeKeyAndOrderFront:nil];
+        {   // the picture / drawable ratio decides whether the text can be sharp
+            NSSize cs = v.bounds.size; double sc = win.backingScaleFactor > 0 ? win.backingScaleFactor : 1.0;
+            LOG("[窗口] 内容 %.0fx%.0f 点，画布 %.0fx%.0f 像素（显示缩放 %.1f）", cs.width, cs.height, cs.width * sc, cs.height * sc, sc); }
         [NSApp activateIgnoringOtherApps:YES];
+        {   // DM_RENDER_SCALE_AT=<seconds>:<scale>[,<seconds>:<scale>...]: same as picking a Render Scale menu item, at fixed times (tests)
+            const char *e = getenv("DM_RENDER_SCALE_AT");
+            for (const char *q = e; q && *q;) { double at = 0, sc = 0;
+                if (sscanf(q, "%lf:%lf", &at, &sc) != 2) break;
+                if (at > 0) [NSTimer scheduledTimerWithTimeInterval:at repeats:NO block:^(NSTimer *t) { (void)t; dm_render_scale_set(sc); }];
+                q = strchr(q, ','); if (q) q++; }
+        }
+        {   // DM_WINDOW_1TO1_AT=<seconds>[:<factor>]: same as View > Window Size (tests)
+            const char *e = getenv("DM_WINDOW_1TO1_AT"); double at = 0, fac = 0;
+            if (e) sscanf(e, "%lf:%lf", &at, &fac);
+            if (e && at > 0) [NSTimer scheduledTimerWithTimeInterval:at repeats:NO block:^(NSTimer *t) { (void)t;
+                NSMenuItem *fake = [[NSMenuItem alloc] init]; fake.representedObject = @(fac); static DMScaleTarget *tg2; tg2 = [DMScaleTarget new]; [tg2 pick:fake]; }];
+        }
         if (getenv("DM_FULLSCREEN")) {   // start in fullscreen (same as the green button)
             [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:NO block:^(NSTimer *t) { (void)t; fs_toggle(win); }];
         }
         [GCController startWirelessControllerDiscoveryWithCompletionHandler:nil];
-        [NSTimer scheduledTimerWithTimeInterval:1.0 / 120.0 repeats:YES block:^(NSTimer *t) { (void)t; pad_poll(); }];
+        [NSTimer scheduledTimerWithTimeInterval:1.0 / 120.0 repeats:YES block:^(NSTimer *t) { (void)t; pad_poll();
+            if (!g_win_sized && !getenv("DM_WINDOW_KEEP_SIZE")) { int pw = 0, ph = 0; int mtl_pic_size(int *w, int *h);
+                if (mtl_pic_size(&pw, &ph)) { g_win_sized = 1; window_fit(win, 1.0); } } }];
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
             if ((e.modifierFlags & NSEventModifierFlagCommand) && !(e.modifierFlags & NSEventModifierFlagControl)) {
