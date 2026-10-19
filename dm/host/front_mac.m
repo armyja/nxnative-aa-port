@@ -133,6 +133,7 @@ void front_run(void (*guest)(void)) {
                                                       backing:NSBackingStoreBuffered defer:NO];
         win.title = @DM_GAME_NAME;   // the game profile's name (game name label)
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;   // green button = real fullscreen (without this it only zooms)
+        win.contentAspectRatio = NSMakeSize(16, 9);   // dragging the corner keeps 16:9, so the picture is never stretched
         // Minimal main menu: without one there is no "Enter Full Screen" item and no Command-Control-F, and Command-Q does not quit
         {
             NSMenu *bar = [[NSMenu alloc] init];
@@ -212,6 +213,8 @@ void front_run(void (*guest)(void)) {
                     LOG("[窗口] 绿色按钮 → %s全屏", win.styleMask & NSWindowStyleMaskFullScreen ? "退出" : "进入");
                     fs_toggle(win); return nil;
                 }
+                NSRect vf = [v convertRect:v.bounds toView:nil];
+                if (!NSPointInRect(e.locationInWindow, vf)) return e;   // title bar and traffic lights go to AppKit (the close button needs one click)
             }
             if (e.type == NSEventTypeLeftMouseUp) { dm_touch_set(NULL, 0); return nil; }
             NSPoint p = [v convertPoint:e.locationInWindow fromView:nil]; NSSize sz = v.bounds.size;

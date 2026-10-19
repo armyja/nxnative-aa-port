@@ -1765,7 +1765,7 @@ static void res_override_maybe(void) {
     }
     LOG("[分辨率] 补丁 %d 处宽度立即数、%d 处高度立即数", nw, nh);
     g_res_w = w; g_res_h = h;
-    LOG("[分辨率] 覆盖交换链尺寸 → %dx%d（%s）", w, h, getenv("DM_RENDER_SCALE") ? "DM_RENDER_SCALE" : "档案 render_scale");
+    LOG("[分辨率] 覆盖交换链尺寸 → %dx%d（%s）", w, h, getenv("DM_GAME_RES") ? "DM_GAME_RES" : (getenv("DM_RENDER_SCALE") ? "DM_RENDER_SCALE" : "档案 render_scale"));
 }
 static int sizetrace_want(void) { static int n = -1; if (n < 0) { const char *e = getenv("DM_NVN_SIZETRACE"); n = e ? atoi(e) : 0; } return n; }
 static void sizetrace_tex(int w, int h, void *lr) {
