@@ -32,6 +32,14 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
         // Fall back to binding order for the texture-like kinds, which is how the game binds them (consecutive slots from the first one).
         int unreflected = 0;
         { NSArray *nts = j[@"notes"]; if ([nts isKindOfClass:[NSArray class]]) for (NSString *nt in nts) if ([nt containsString:@"无配对 PC 反射"]) unreflected = 1; }
+        // Only renumber when the build really lost the registers (every texture binding at 0). Some unreflected programs do carry distinct registers
+        // (AA456's evidence-model shader: LUT at 0, albedo at 5); renumbering those made it sample the wrong slots (a green gradient map instead of the
+        // badge texture), because a sampler binding in between also consumes a number.
+        if (unreflected) { int all_zero = 1;
+            for (NSDictionary *b in bs) { NSString *k = b[@"kind"];
+                if (![k isEqualToString:@"tex"] && ![k isEqualToString:@"samp_tex"] && ![k isEqualToString:@"tex_ubo"]) continue;
+                id rg = b[@"reg"]; if ([rg isKindOfClass:[NSNumber class]] && [rg intValue] > 0) { all_zero = 0; break; } }
+            if (!all_zero) unreflected = 0; }
         int tex_seq = 0;
         for (NSDictionary *b in bs) {
             NSString *k = b[@"kind"]; nvn_rbind *r = &o->b[o->nb];

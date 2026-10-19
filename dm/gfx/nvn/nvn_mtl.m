@@ -4935,6 +4935,21 @@ frz_plain:;
     __unsafe_unretained id<MTLRenderPipelineState> ps = cur_ps;
     if (!ps) { PDS("Z %llu 绘制跳过：没有渲染管线（顶点 %s 片元 %s）", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-"); return; }
     { static int dl = -1; if (dl < 0) dl = getenv("DM_NVN_DRAWLOG") != NULL;
+      static const char *dtx; static int dtx_n = -1; if (dtx_n < 0) { dtx = getenv("DM_NVN_DRAWTEX"); dtx_n = dtx && *dtx; }
+      if (dtx_n && pr->sh[1] && !strncmp(pr->sh[1]->key, dtx, strlen(dtx))) {
+          __unsafe_unretained NvShader *s1 = pr->sh[1];
+          for (int i = 0; i < s1->rf.nb; i++) { const nvn_rbind *b = &s1->rf.b[i];
+              if (b->kind != NVN_RB_TEX && b->kind != NVN_RB_TBUF) continue;
+              uint64_t hh = b->reg < 128 ? S.tex[1][b->reg] : 0; int tid = (int)(hh & 0xfffff);
+              pthread_mutex_lock(&g_rmu); const tex_t *t = (tid > 0 && tid < g_ntreg && g_treg[tid].ok) ? &g_treg[tid].t : NULL;
+              LOG("[drawtex] %s reg=%d 句柄=%#llx tid=%d 序号=%llu 格式=%#x %ux%u 级=%u", s1->key, b->reg, (unsigned long long)hh, tid,
+                  t ? (unsigned long long)t->serial : 0ull, t ? t->d.format : 0u, t ? t->d.width : 0u, t ? t->d.height : 0u, t ? t->d.levels : 0u);
+              pthread_mutex_unlock(&g_rmu); }
+          { int shown = 0; for (int r = 0; r < 128; r++) { uint64_t hh = S.tex[1][r]; if (!hh) continue; int tid = (int)(hh & 0xfffff); if (!tid) continue;
+              pthread_mutex_lock(&g_rmu); const tex_t *t = (tid > 0 && tid < g_ntreg && g_treg[tid].ok) ? &g_treg[tid].t : NULL;
+              LOG("[drawtex]   槽 %d 句柄=%#llx tid=%d 序号=%llu 格式=%#x %ux%u", r, (unsigned long long)hh, tid,
+                  t ? (unsigned long long)t->serial : 0ull, t ? t->d.format : 0u, t ? t->d.width : 0u, t ? t->d.height : 0u);
+              pthread_mutex_unlock(&g_rmu); if (++shown > 40) break; } } }
       if (dl) LOG("[draw] 通道 %llu 图元 %d 首 %d 数 %d 实例 %d vs=%s ps=%s", g_stat_pass,
                   dw ? dw->prim : (di ? di->prim : -1), dw ? dw->first : 0, dw ? dw->count : (di ? di->count : -1),
                   dw ? dw->instances : (di ? di->instances : -1), pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-"); }

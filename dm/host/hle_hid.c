@@ -87,19 +87,21 @@ void hid_keys_init(void) {
 // timestamp changes, so a driver script can play the game from a shell while it runs in the background: no window focus, no keyboard, and no
 // fixed frame schedule (the test sends the next key after looking at the previous screenshot). Screenshots go through dm_gfx_shot_at, which
 // captures the present frame two frames later on the present thread.
-static int ctl_parse(const char *s, uint64_t *btn, int32_t *lx, int32_t *ly, double *hold) {
+static int ctl_parse(const char *s, uint64_t *btn, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry, double *hold) {
     static const char *names[16] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "Plus", "Minus", "Left", "Up", "Right", "Down"};
     char buf[256]; snprintf(buf, sizeof buf, "%s", s);
     char *h = strchr(buf, '~'); *hold = 0.15; if (h) { *h = 0; *hold = atof(h + 1); if (*hold <= 0) *hold = 0.15; }
-    *btn = 0; *lx = 0; *ly = 0;
+    *btn = 0; *lx = 0; *ly = 0; *rx = 0; *ry = 0;
     int any = 0;
     for (char *k = buf; k && *k;) {
         char *plus = strchr(k, '+'); if (plus) *plus = 0;
         int found = 0;
         for (int b = 0; b < 16; b++) if (!strcasecmp(k, names[b])) { *btn |= 1ull << b; found = 1; }
         static const char *const sticks[4] = {"LLeft", "LUp", "LRight", "LDown"};
+        static const char *const rstk[4] = {"RLeft", "RUp", "RRight", "RDown"};
         static const int sx[4] = {-32767, 0, 32767, 0}, sy[4] = {0, 32767, 0, -32767};
         for (int d = 0; d < 4; d++) if (!strcasecmp(k, sticks[d])) { if (sx[d]) *lx = sx[d]; if (sy[d]) *ly = sy[d]; found = 1; }
+        for (int d = 0; d < 4; d++) if (!strcasecmp(k, rstk[d])) { if (sx[d]) *rx = sx[d]; if (sy[d]) *ry = sy[d]; found = 1; }   // right stick (evidence rotation in AA456)
         any |= found;
         k = plus ? plus + 1 : NULL;
     }
@@ -113,10 +115,10 @@ static void *ctl_main(void *arg) {
         if (!stat(p, &sb) && ((long long)sb.st_mtimespec.tv_sec * 1000000000ll + sb.st_mtimespec.tv_nsec) != kt) {
             kt = (long long)sb.st_mtimespec.tv_sec * 1000000000ll + sb.st_mtimespec.tv_nsec;
             buf[0] = 0; FILE *f = fopen(p, "r"); if (f) { if (!fgets(buf, sizeof buf, f)) buf[0] = 0; fclose(f); } char *nl = strchr(buf, '\n'); if (nl) *nl = 0;
-            uint64_t b = 0; int32_t lx = 0, ly = 0; double hold;
-            if (buf[0] && ctl_parse(buf, &b, &lx, &ly, &hold) && (b || lx || ly)) {
-                LOG("DM_CTL：按 %s（%#llx 摇杆 %d,%d 按住 %.2f s）", buf, (unsigned long long)b, lx, ly, hold);
-                script_set(b, lx, ly, 0, 0); usleep((useconds_t)(hold * 1e6)); script_set(0, 0, 0, 0, 0);
+            uint64_t b = 0; int32_t lx = 0, ly = 0, rx = 0, ry = 0; double hold;
+            if (buf[0] && ctl_parse(buf, &b, &lx, &ly, &rx, &ry, &hold) && (b || lx || ly || rx || ry)) {
+                LOG("DM_CTL：按 %s（%#llx 摇杆 %d,%d 右摇杆 %d,%d 按住 %.2f s）", buf, (unsigned long long)b, lx, ly, rx, ry, hold);
+                script_set(b, lx, ly, rx, ry); usleep((useconds_t)(hold * 1e6)); script_set(0, 0, 0, 0, 0);
             } else if (buf[0]) LOG("【红】DM_CTL：认不出的按键串 %s", buf);
         }
         snprintf(p, sizeof p, "%s/shot", dir);
