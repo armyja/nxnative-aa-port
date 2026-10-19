@@ -2416,7 +2416,7 @@ void mtl_watch_tex(uint64_t off) {
     pthread_mutex_lock(&g_rmu);
     for (int i = 0; i < g_ntreg; i++) {
         treg_t *r = &g_treg[i]; if (!r->ok) continue;
-        if (off ? r->t.off != (ptrdiff_t)off : !(r->t.d.width == g_watch_w && r->t.d.height == g_watch_h)) continue;
+        if (off ? r->t.off != (ptrdiff_t)off : !(g_watch_w ? (r->t.d.width >= g_watch_w && r->t.d.height >= g_watch_h) : 0)) continue;
         if (!off) {   // per-4MB segment non-zero counts: is the second half ever written?
             uint64_t sz2 = r->t.L.size, seg[8] = {0}; int ns = (int)((sz2 + (4u << 20) - 1) / (4u << 20)); if (ns > 8) ns = 8;
             if (r->t.mem) for (int g = 0; g < ns; g++) { uint64_t a = (uint64_t)g << 22, b2 = a + (4u << 20); if (b2 > sz2) b2 = sz2;
