@@ -98,13 +98,21 @@ static int g_win_sized;   // the window has been sized to the picture (the game 
 @implementation DMWinDelegate
 - (NSSize)windowWillResize:(NSWindow *)w toSize:(NSSize)fsz {
     if (w.styleMask & NSWindowStyleMaskFullScreen) return fsz;
-    // The corner opposite the one being dragged is the anchor: of the two 16:9 candidates that fit the proposed
-    // rect (width-driven and height-driven) take the SMALLER, so the window always stays inside the drag and the
-    // result is a continuous function of the proposed size - nothing to oscillate between.
     NSRect c = [w contentRectForFrameRect:NSMakeRect(0, 0, fsz.width, fsz.height)];
     if (c.size.width < 64 || c.size.height < 36) return fsz;
     double cw = c.size.width, ch = c.size.height;
-    double cwFit = cw < ch * 16.0 / 9.0 ? cw : ch * 16.0 / 9.0;   // the smaller of the two candidates
+    NSRect cur = w.frame;
+    double dw = fabs(fsz.width - cur.size.width), dh = fabs(fsz.height - cur.size.height);
+    double cwFit;
+    if (dh < 1e-6 && dw >= 1e-6) {
+        cwFit = cw;                     // left/right edge: only the width moved, so the width drives
+    } else if (dw < 1e-6 && dh >= 1e-6) {
+        cwFit = ch * 16.0 / 9.0;        // top/bottom edge: only the height moved, so the height drives
+    } else {
+        // corner: the opposite corner is the anchor, so take the smaller of the two candidates (the window stays
+        // inside the drag and the result is continuous - nothing to oscillate between)
+        cwFit = cw < ch * 16.0 / 9.0 ? cw : ch * 16.0 / 9.0;
+    }
     NSRect f = [w frameRectForContentRect:NSMakeRect(0, 0, cwFit, cwFit * 9.0 / 16.0)];
     return NSMakeSize(round(f.size.width), round(f.size.height));
 }
