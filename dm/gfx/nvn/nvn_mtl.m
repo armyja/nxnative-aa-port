@@ -3310,14 +3310,23 @@ static uint64_t ui_mat_patch(const p_bind_buf *u, void *mb, uint64_t mo) {
 // Bindless handle (TEXU / SAMPU): the 32-bit word at byte offset off of uniform slot reg = the low 32 bits of the NVN handle the game wrote there (low 20 bits texture ID, high 12 bits sampler ID).
 // Read on the CPU side at replay time (the memory at the same moment a real GPU would read it at execution); slot unbound / out of range / unreadable = 0 (empty slot: dummy texture / dummy sampler).
 // A location with a GPU-side write queued in this submit (pend_hits) is still read at its current value; the first case is reported red.
+// Uniform bytes as the GPU will see them: with DM_UB_STAGE the update was never copied into the guest buffer, so the staged copy is the truth
+static int ub_bytes(uint64_t addr, uint64_t n, void *dst) {
+    __unsafe_unretained id<MTLBuffer> b; uint64_t o;
+    if (ub_stage_hit(addr, n, &b, &o)) { const uint8_t *p = (const uint8_t *)b.contents; if (!p) return 0; memcpy(dst, p + o, (size_t)n); return 1; }
+    return 0;
+}
 static uint32_t ubo_handle(int stage, int reg, int off) {
     if (stage < 0 || stage >= 6 || reg < 0 || reg >= 16) return 0;
     const p_bind_buf *u = &S.ubo[stage][reg];
     if (!u->addr || (uint64_t)off + 4 > u->size) return 0;
-    if (pend_hits(u->addr + off, 4)) RED_ONCE(47, "无绑定句柄所在的 uniform 缓冲（阶段 %d 槽 %d +%#x）本提交里有 GPU 侧写入：读的是当前值", stage, reg, off);
+    uint32_t h;
+    if (ub_bytes(u->addr + off, 4, &h)) return h;   // staged update: the staged copy is what the GPU reads
+    if (pend_hits(u->addr + off, 4)) RED_ONCE(47, "无绑定句柄所在的 uniform 缓冲（阶段 %d 槽 %d +%#x）本提交里有 GPU 侧写入：读的是当前值",
+                                              stage, reg, (unsigned)(off));
     void *mb; uint64_t mo; const uint8_t *base;
     if (!mtl_addr(u->addr + off, 4, &mb, &mo) || !(base = [(__bridge id<MTLBuffer>)mb contents])) return 0;
-    uint32_t h; memcpy(&h, base + mo, 4); return h;
+    memcpy(&h, base + mo, 4); return h;
 }
 static __unsafe_unretained id<MTLBuffer> g_ub_hit_buf; static uint64_t g_ub_hit_off;
 static uint32_t g_dispatch_dim[3];   // the current dispatch's workgroup counts (driver segment c0 + 0x200 for compute)
@@ -4573,7 +4582,9 @@ static int ubo_float(int slot, uint16_t ref, float *out) {   // Component cmp of
     int sl = ref >> 8, vec = ref >> 2 & 63, cmp = ref & 3;
     if (slot < 0 || slot >= 6 || sl < 0 || sl >= 16) return 0;
     const p_bind_buf *u = &S.ubo[slot][sl]; uint64_t off = (uint64_t)vec * 16 + (uint64_t)cmp * 4;
-    if (!u->addr || off + 4 > u->size || pend_hits(u->addr + off, 4)) return 0;
+    if (!u->addr || off + 4 > u->size) return 0;
+    if (ub_bytes(u->addr + off, 4, out)) return 1;
+    if (pend_hits(u->addr + off, 4)) return 0;
     void *mb; uint64_t mo; const uint8_t *base;
     if (!mtl_addr(u->addr + off, 4, &mb, &mo) || !(base = [(__bridge id<MTLBuffer>)mb contents])) return 0;
     memcpy(out, base + mo, 4); return 1;
