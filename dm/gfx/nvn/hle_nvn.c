@@ -469,6 +469,8 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
         if (dump && sd[i].control) { void *c = malloc(0x880); memcpy(c, sd[i].control, 0x880); o->sd[i].control = c; }
     }
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
+    if (getenv("DM_NVN_DISPATCHLOG")) { char bits[8] = "------"; for (int i = 0; i < n && i < 6; i++) bits[i] = (k->ok >> i & 1) ? '1' : '0';
+        LOG("[set] 程序 %p n=%d 键成功位=%s cs数据=%d cs控制=%d", (void *)p, n, bits, n > 5 ? (sd[5].data != NULL) : -1, n > 5 ? (sd[5].control != NULL) : -1); }
     return 1;
 }
 
