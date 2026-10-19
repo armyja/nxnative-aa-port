@@ -454,10 +454,19 @@ int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_
     int ok = 0;
     pthread_mutex_lock(&g_mu);
     int i = pool_find(addr, len);
-    if (i < 0) i = pool_find(addr, 1);   // a binding may span several adjacent virtual mappings: bind the mapping that holds its start
     if (i < 0) { uint64_t h = vmap_xlate(addr); if (h) { i = pool_find(h, len); if (i >= 0) addr = h; } }
     if (i >= 0) { pool_res(i); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; *gpu = g_pools[i].gpu + *off; ok = 1; }
     pthread_mutex_unlock(&g_mu);
+    if (!ok && len >= (4u << 20)) {   // A binding larger than one 4 MB mapping (AA456's evidence model binds a 24 MB storage buffer as a device pointer): give the GPU one buffer over the whole contiguous alias run, like the texture upload path does. Binding the mapping that holds the start would make every read past its end out of bounds.
+        void *fb; uint64_t fo;
+        if (mtl_vmap_flat(addr, len, &fb, &fo)) { *buf = fb; *off = fo; *gpu = [(__bridge id<MTLBuffer>)fb gpuAddress] + fo; ok = 1; }
+    }
+    if (!ok) {
+        pthread_mutex_lock(&g_mu);
+        i = pool_find(addr, 1);   // smaller bindings that only touch the next mapping: bind the mapping that holds the start
+        if (i >= 0) { pool_res(i); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; *gpu = g_pools[i].gpu + *off; ok = 1; }
+        pthread_mutex_unlock(&g_mu);
+    }
     return ok;
 }
 
@@ -5136,8 +5145,9 @@ static void fb_prepare(NvProg *pr) {
     if (g_fb_rebind) { args_dirty_all(); g_fb_rebind = 0; }   // the previous draw had a substituted binding: re-encode with the original bindings this time
     if (!pr || !pr->sh[1] || !R.rt.n || g_fz.active || g_defer_replaying || !fb_want(pr->sh[1]->key)) return;
     NvShader *fs = pr->sh[1];
-    for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) { const nvn_rbind *b = &fs->rf.b[i]; if (b->kind != NVN_RB_TEX || b->reg >= 128) continue;
-        int tid = (int)(S.tex[1][b->reg] & 0xfffff); if (!tid) continue;
+    for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) { const nvn_rbind *b = &fs->rf.b[i]; if ((b->kind != NVN_RB_TEX && b->kind != NVN_RB_TEXU) || b->reg >= 128) continue;
+        // bindless (TEXU) sampling goes through a handle in the uniform buffer: resolve it the same way encode_args will
+        int tid = b->kind == NVN_RB_TEXU ? (int)(ubo_handle(1, b->reg, b->off) & 0xfffff) : (int)(S.tex[1][b->reg] & 0xfffff); if (!tid) continue;
         pthread_mutex_lock(&g_rmu); uint64_t ser = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t.serial : 0; pthread_mutex_unlock(&g_rmu);
         if (!ser) continue;
         for (int k = 0; k < R.rt.n && k < 8 && g_fb_n < 4; k++) { if (!R.rt.color[k] || R.rt.color[k]->serial != ser) continue;
@@ -6360,7 +6370,8 @@ void mtl_exec(const uint8_t *p) {
                 }
                 size_t stride = d->stride > 0 ? (size_t)d->stride : (d->itype >= 0 ? 20u : 16u);
                 { static int dl2 = -1; if (dl2 < 0) dl2 = getenv("DM_NVN_DRAWLOG") != NULL;
-                  if (dl2) LOG("[drawind] 帧 %llu 图元 %d 索引类型 %d max=%d 计数=%u stride=%zu 参数块=%#llx 计数块=%#llx", (unsigned long long)atomic_load(&g_cur_frame), d->prim, d->itype, d->max, n, stride, (unsigned long long)d->indbuf, (unsigned long long)d->countbuf); }
+                  if (dl2) LOG("[drawind] 帧 %llu 图元 %d 索引类型 %d max=%d 计数=%u stride=%zu 参数块=%#llx 计数块=%#llx 目标=%llu/%llu 通道=%llu", (unsigned long long)atomic_load(&g_cur_frame), d->prim, d->itype, d->max, n, stride, (unsigned long long)d->indbuf, (unsigned long long)d->countbuf,
+                               (unsigned long long)(R.rt.n && R.rt.color[0] ? R.rt.color[0]->serial : 0), (unsigned long long)(R.rt.n > 1 && R.rt.color[1] ? R.rt.color[1]->serial : 0), (unsigned long long)g_stat_pass); }
                 g_exec_next = p + h.size;
                 for (uint32_t i = 0; i < n; i++) {
                     void *ib; uint64_t io;
@@ -6904,6 +6915,14 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         static int rinited, rtaken; static uint64_t rwant; static char rpath[1024];
         if (!rinited) { rinited = 1; const char *e = getenv("DM_SHOT_RAW"); if (e) { const char *c = strchr(e, ':'); if (c) { rwant = strtoull(e, NULL, 10); strlcpy(rpath, c + 1, sizeof rpath); } } }
         if (rpath[0] && !rtaken && g_present_n >= rwant) { rtaken = 1; shot(src, rpath, 0, crop); MLOG("【截图-原始】%s 帧 %llu %zux%zu", rpath, (unsigned long long)g_present_n, src.width, src.height); }
+        static int binited; static uint64_t bser, b0, b1; static char bpath[1024];   // DM_TEXBURST=<serial>:<first present>:<last present>:<path with %d>: dump one texture at every present in the range
+        if (!binited) { binited = 1; const char *e = getenv("DM_TEXBURST");
+            if (e) { unsigned long long sv = 0, a = 0, b = 0; int n = sscanf(e, "%llu:%llu:%llu:%1023s", &sv, &a, &b, bpath); if (n == 4) { bser = sv; b0 = a; b1 = b; } else bpath[0] = 0; } }
+        if (bpath[0] && g_present_n >= b0 && g_present_n <= b1 && (g_present_n % 8) < 2) {   // two consecutive presents (both parities) every 8 frames
+            static int blogged; __unsafe_unretained id t = serial_get(bser);
+            if (t && [t conformsToProtocol:@protocol(MTLTexture)]) { char pz[1024]; snprintf(pz, sizeof pz, bpath, (int)g_present_n); shot((id<MTLTexture>)t, pz, 0, crop);
+                if (blogged++ < 4) MLOG("【贴图连拍】ser=%llu 帧 %llu → %s", (unsigned long long)bser, (unsigned long long)g_present_n, pz); }
+            else if (!blogged++) MLOG("【红】贴图连拍：ser=%llu 取不到贴图", (unsigned long long)bser); }
         static int sinited, staken; static uint64_t swant, sser; static char spath2[1024];
         if (!sinited) { sinited = 1; const char *e = getenv("DM_SHOT_SER"); if (e) { unsigned long long sv = 0, fv = 0; int n = sscanf(e, "%llu:%llu:%1023s", &sv, &fv, spath2); if (n == 3) { sser = sv; swant = fv; } else if (n == 2) { sser = sv; swant = 0; spath2[0] = 0; } } }
         if (spath2[0] && !staken && g_present_n >= swant) { staken = 1; __unsafe_unretained id t = serial_get(sser);
