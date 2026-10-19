@@ -377,6 +377,7 @@ static void map_image(module_t *m, const char *dir) {
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
         memcpy(m->base, raw, fl); memcpy(a, raw + fl, sz - fl); free(raw); install_key_page(m);
+        void dm_il2cpp_file_patch(module_t *m); dm_il2cpp_file_patch(m);   // Unity IL2CPP managed file API (needs writable text)
         uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
         if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
         // DM_TEXT_WRITABLE=1: leave the text segment RWX so a debugger (lldb) can set software breakpoints on
@@ -390,6 +391,7 @@ static void map_image(module_t *m, const char *dir) {
     m->base = mmap(NULL, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
     memcpy(m->base, raw, sz); free(raw); install_key_page(m);
+    void dm_il2cpp_file_patch(module_t *m); dm_il2cpp_file_patch(m);
     uint64_t rx = (m->text_end + 0x3FFF) & ~0x3FFFull;
     if (mprotect(m->base, rx, PROT_READ | PROT_EXEC)) die("%s mprotect text", m->name);
     uint64_t po = m->patch_off & ~0x3FFFull;

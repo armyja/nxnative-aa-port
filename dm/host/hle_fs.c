@@ -269,6 +269,9 @@ static int norm_rest(const char *rest, char *out, size_t n) {
 }
 // create only allows the last component to not exist yet; intermediate directories still need an exact match.
 static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create) {
+    // Unity's .NET path code (Path.GetFullPath with cwd "/") hands device paths over as "/rom:/…": Horizon accepts the
+    // leading separator, so skip it before matching a mount name.
+    while (*p == '/') p++;
     const char *c = strchr(p, ':');
     if (!c) { errno = ENOENT; return 0; }
     size_t ln = c - p;
@@ -296,6 +299,8 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
     errno = ENOENT; return 0;
 }
 static int host_path(const char *p, char *out, size_t n, int *ro) { return host_path_ex(p, out, n, ro, 0); }
+// 给别的子系统（.NET 托管侧的 stat/open 钩子）用：把 guest 设备路径翻成宿主路径
+int dm_fs_guest_path(const char *p, char *out, size_t n, int *ro) { return host_path(p, out, n, ro); }
 static int set_guest_name(const char *hp, const char *path) {
     const char *end = path + strlen(path); while (end > path && end[-1] == '/') end--;
     const char *start = end; while (start > path && start[-1] != '/' && start[-1] != ':') start--;

@@ -47,3 +47,8 @@ shader_groups	/Resources/=engine /globalgamemanagers=engine /StreamingAssets/=as
 shader_note	Ace Attorney Investigations Collection (Unity IL2CPP)
 # UnityPy (pip install UnityPy) reads the Shader objects of this game: its player strips type trees and patches the
 # common string table, so unityfs cannot decode them. Run shader_split.py with DM_UNITYPY=1.
+# Unity IL2CPP: .NET's own file API (System.IO) does not call nn::fs -- IL2CPP's PAL in main calls the SDK's libc stat,
+# which the host does not hook, so File.Exists said "not found" for files that are in the RomFS and Addressables refused
+# to start ("Invalid path in TextDataProvider ... settings.json"). The host now branches the two PAL byte-path stat
+# entries (main+0x321f4c0 / +0x321f610) and their native bodies (main+0x3e4830 / +0x3e4a10) into hle_il2cpp.c, which
+# answers from the same mount table as the nn::fs hooks. Keyed by the main build ID inside that file.
