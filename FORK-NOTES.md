@@ -1,8 +1,8 @@
 # This fork
 
 A fork of [nxnative](https://github.com/seedds/nxnative) (MIT) with fixes and tools developed while
-bringing up **Ace Attorney 123 Trilogy** (`0100CB000A142000`) and **Apollo Justice 456 Trilogy**
-(`010020D01B890000`) on Apple Silicon macOS.
+bringing up **Ace Attorney 123 Trilogy** (`0100CB000A142000`), **Apollo Justice 456 Trilogy**
+(`010020D01B890000`) and **Ace Attorney Investigations 1&2** (`010005501E68C000`) on Apple Silicon macOS.
 
 Nothing from any game is in this repository: no ROMs, no keys, no extracted data, no patched binaries.
 You need your own legally obtained copy of the game and your own `prod.keys`; this project does not
@@ -27,16 +27,42 @@ provide or explain how to obtain either. Not affiliated with Nintendo or any gam
    cross-examination, the Court Record with its 3D evidence viewer, the pause menu and save/load all work at
    30 fps. Bring-up notes: [docs/aa456-bringup.md](docs/aa456-bringup.md).
 
-4. **Profiles** for `0100CB000A142000` and `010020D01B890000`, both working.
+4. **Ace Attorney Investigations 1&2** (`010005501E68C000`, Unity 2022 IL2CPP) is playable: the game boots
+   through its first-run screens into Episode 1, dialogue advances, the Plus menu opens, and save/load works
+   with the host's local time. What it took is listed under [Unity (Investigations)](#unity-investigations)
+   below.
 
-5. **Render resolution override** (opt-in, `DM_GAME_RES=<w>x<h>`): the game's own output-size constants are
+5. **Profiles** for `0100CB000A142000`, `010020D01B890000` and `010005501E68C000`, all working.
+
+6. **Render resolution override** (opt-in, `DM_GAME_RES=<w>x<h>`): the game's own output-size constants are
    patched in the guest image, so the engine really renders above 1080p instead of upsampling. Native
    `DM_GAME_RES=1920x1080` stays the default (at higher sizes the game's 1080p character art shows a thin
    seam on some animation frames).
 
-6. **Mac front end polish**: the window sizes itself to the picture (1:1, pixel exact), keeps 16:9 while
+7. **Mac front end polish** (right button = A, left = touchscreen, window sizing, focus handling): the window sizes itself to the picture (1:1, pixel exact), keeps 16:9 while
    dragging, mouse clicks become touch points (`nn::hid` touch screen), keyboard + controller input, one-click
    fullscreen.
+
+## Unity (Investigations)
+
+Unity titles need four things the two MT Framework / RE Engine games never used:
+
+- **Shaders live in Addressables bundles.** `dm/gfx/tools/shader_split.py` reads them with
+  [UnityPy](https://github.com/K0lb3/UnityPy) when `DM_UNITYPY=1` (`pip install UnityPy`): the release player
+  strips type trees and patches its own common-string table, so the repository's UnityFS reader cannot decode
+  the Shader objects. A Unity 2022 Switch subprogram holds every stage of a variant as a NVN control section
+  followed by its code area, both stages coming from the same subprogram.
+- **The managed file API does not use `nn::fs`.** `System.IO.File.Exists` goes through IL2CPP's PAL to the SDK's
+  libc `stat`, which opens an fsp-srv session the host does not implement, so Addressables reported "file not
+  found" for files that were right there. `dm/host/hle_il2cpp.c` branches the PAL stat entries into the host,
+  which answers from the same mount table as `nn::fs`.
+- **The process heap must be sized before the title starts.** On hardware the loader does it; here
+  `nn::os::AllocateMemoryBlock` failed with a zero heap and Unity's font engine crashed on a 16 MB buffer.
+  The profile key `heap_default` (Investigations only) hands out 1 GB at the first svc.
+- **Random numbers and the clock** come from services: `nn::crypto` / `nn::os` random bytes and
+  `std::chrono::system_clock::now` are patched in the sdk module to the host's `arc4random` and wall clock,
+  and `nn::time::StandardUserSystemClock::GetSystemClockContext` answers with the host's local offset, which is
+  what the save slots display.
 
 ## Where the files go
 
@@ -120,6 +146,20 @@ What the variables mean:
 | `DM_NVN_CBDEFER=1` | 123's command-buffer deferral (leave it on for 123) |
 
 See the upstream `README.md` and `docs/` for the general workflow (survey, profiles, shader pipeline).
+
+## Running Ace Attorney Investigations
+
+```bash
+cd ~/projects/nxnative
+B=~/projects/aai_collection                  # XCI unpacked here: extract/{ExeFS,RomFS} and patched_v0
+make -C dm/host GAME=010005501E68C000 dmhost
+DM_WINDOW=1 DM_AUDIO=1 DM_MSL_DIR="$B/work/cache" DM_ROMFS="$B/extract/RomFS" \
+DM_SAVE="$B/run/save" DM_TEMP="$B/run/temp" \
+dm/host/dmhost "$B/patched_v0"
+```
+
+The shader cache under `$B/work/cache/b-<chain>` is built by `dm/gfx/tools/dmsh_build.py` from the tables
+`shader_split.py` writes into the profile; the chain version is in `dm/games/010005501E68C000/dmsh_chain.h`.
 
 ## Licence
 

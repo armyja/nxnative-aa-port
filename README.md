@@ -1,6 +1,6 @@
 # nxnative
 
-> **This fork**: **Ace Attorney 123 and Apollo Justice 456 are playable** on the Mac host and
+> **This fork**: **Ace Attorney 123, Apollo Justice 456 and Ace Attorney Investigations 1&2 are playable** on the Mac host and
 > in the iOS app — court scenes, cross-examination, the Court Record, the 3D evidence viewer and save/load all work.
 > This fork also carries the 123 save/load fix, XCI extraction support and the bring-up notes.
 > See [FORK-NOTES.md](FORK-NOTES.md). No game files, keys or extracted data are included here.
@@ -55,6 +55,7 @@ Both trilogies run on the Mac host (`dm/host/dmhost`) and in the iOS app:
 |---|---|---|---|
 | Phoenix Wright: Ace Attorney Trilogy | 0100CB000A142000 | base game + update 1.1.0 | Save/load fixed in this fork; keyboard, controller and mouse (as touch) input |
 | Apollo Justice: Ace Attorney Trilogy | 010020D01B890000 | base game + update 1.0.0 | Court Record with the 3D evidence viewer, save/load, 30 fps; renders natively at 1920×1080, `DM_GAME_RES=2560x1440` raises the internal resolution |
+| Ace Attorney Investigations 1&2: Miles Edgeworth | 010005501E68C000 | base game (v1.0.0) | Unity (IL2CPP): dialogue, menus, save/load, keyboard, controller and mouse (as touch); renders at 1920×1080 |
 
 How to run them on a Mac (`B` is the build directory the extraction step wrote for that title, e.g.
 `~/projects/aa123/0100CB000A142000_build` — the layouts and every variable are listed in
@@ -80,11 +81,22 @@ DM_SAVE="$B/run/save" DM_TEMP="$B/run/temp" \
 dm/host/dmhost "$B/patched_v65536"
 ```
 
+```bash
+cd ~/projects/nxnative                       # repository root
+B=~/projects/aai_collection                  # extraction folder of the Investigations XCI
+make -C dm/host GAME=010005501E68C000 dmhost
+DM_WINDOW=1 DM_AUDIO=1 DM_MSL_DIR="$B/work/cache" DM_ROMFS="$B/extract/RomFS" \
+DM_SAVE="$B/run/save" DM_TEMP="$B/run/temp" \
+dm/host/dmhost "$B/patched_v0"
+```
+
 | | |
 |:---:|:---:|
 | ![Ace Attorney 123 — court lobby](docs/images/aa123_lobby.jpg)<br>Ace Attorney 123 — court lobby | ![Ace Attorney 123 — save/load](docs/images/aa123_load.jpg)<br>Ace Attorney 123 — save/load |
 | ![Apollo Justice 456 — cross-examination](docs/images/aa456_dialogue.jpg)<br>Ace Attorney 456 — cross-examination | ![Apollo Justice 456 — Court Record](docs/images/aa456_record.jpg)<br>Ace Attorney 456 — Court Record (evidence details) |
 | ![Apollo Justice 456 — 3D evidence](docs/images/aa456_evidence.jpg)<br>Ace Attorney 456 — 3D evidence viewer | ![Apollo Justice 456 — pause menu](docs/images/aa456_menu.jpg)<br>Ace Attorney 456 — pause menu |
+| ![Investigations — save slots](docs/images/aai_save_slot.jpg)<br>Investigations — save slots (local time) | ![Investigations — in game](docs/images/aai_ingame.jpg)<br>Investigations — Episode 1 in game |
+| ![Investigations — auto-save notice](docs/images/aai_autosave.jpg)<br>Investigations — auto-save notice | ![Investigations — language setup](docs/images/aai_language.jpg)<br>Investigations — language setup |
 
 Needs iOS / iPadOS 26 or later. Other games aren't supported yet. For them the script writes a survey and still tries its best to pack an IPA, guessing the game's settings; such an IPA may not start.
 
@@ -118,6 +130,10 @@ The IPA appears in the same folder (here `~/Games/MarioWonder/SMBWMobile.ipa`). 
 **4. Install** the IPA with your sideloading tool (AltStore, Sideloadly, LiveContainer, …). The app gets the game's name and icon.
 
 ## Play
+
+**Mouse on the Mac host.** The left button is the touchscreen (some Ace Attorney menus answer a tap); the right
+button presses **A**, so screens that are button-only in the original (for example the "load this save?"
+confirmation) work with the mouse alone.
 
 **Touch controls.** Tap **2D** / **3D** at the top to switch layouts; the app remembers your choice. 3D World and Breath of the Wild start in 3D, the other games in 2D.
 
@@ -204,6 +220,7 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license; see [dm/th
 |---|---|---|---|
 | 逆转裁判 123 成步堂精选集 | 0100CB000A142000 | 本体 + 1.1.0 更新 | 本分支修好了存档/读档；键盘、手柄、鼠标（当触摸）都可用 |
 | 逆转裁判 456 王泥喜精选集 | 010020D01B890000 | 本体 + 1.0.0 更新 | 法庭记录（含 3D 证物查看）、存档读档、30 fps；原生 1920×1080 渲染，`DM_GAME_RES=2560x1440` 可提高内部渲染分辨率 |
+| 逆转检察官1&2 御剑精选集 | 010005501E68C000 | 本体（v1.0.0） | Unity（IL2CPP）：对话、菜单、存读档、键盘/手柄/鼠标（当触屏）；1920×1080 原生渲染 |
 
 在 Mac 上运行（`B` 就是解包工具为这个游戏生成的构建目录，例如 `~/projects/aa123/0100CB000A142000_build`；
 目录结构和每个环境变量在 [FORK-NOTES.md](FORK-NOTES.md) 里都有说明）：
@@ -228,11 +245,22 @@ DM_SAVE="$B/run/save" DM_TEMP="$B/run/temp" \
 dm/host/dmhost "$B/patched_v65536"
 ```
 
+```bash
+cd ~/projects/nxnative                       # 仓库根目录
+B=~/projects/aai_collection                  # 御剑精选集 XCI 的解包目录
+make -C dm/host GAME=010005501E68C000 dmhost
+DM_WINDOW=1 DM_AUDIO=1 DM_MSL_DIR="$B/work/cache" DM_ROMFS="$B/extract/RomFS" \
+DM_SAVE="$B/run/save" DM_TEMP="$B/run/temp" \
+dm/host/dmhost "$B/patched_v0"
+```
+
 | | |
 |:---:|:---:|
 | ![逆转裁判 123 — 法庭前厅](docs/images/aa123_lobby.jpg)<br>逆转裁判 123 — 法庭前厅 | ![逆转裁判 123 — 存档读档](docs/images/aa123_load.jpg)<br>逆转裁判 123 — 存档读档 |
 | ![逆转裁判 456 — 法庭询问](docs/images/aa456_dialogue.jpg)<br>逆转裁判 456 — 法庭询问 | ![逆转裁判 456 — 法庭记录](docs/images/aa456_record.jpg)<br>逆转裁判 456 — 法庭记录（证物详情） |
 | ![逆转裁判 456 — 3D 证物](docs/images/aa456_evidence.jpg)<br>逆转裁判 456 — 3D 证物查看 | ![逆转裁判 456 — 暂停菜单](docs/images/aa456_menu.jpg)<br>逆转裁判 456 — 暂停菜单 |
+| ![御剑精选集 — 存档槽](docs/images/aai_save_slot.jpg)<br>御剑精选集 — 存档槽（本地时间） | ![御剑精选集 — 游戏内](docs/images/aai_ingame.jpg)<br>御剑精选集 — 第一话游戏内 |
+| ![御剑精选集 — 自动存档提示](docs/images/aai_autosave.jpg)<br>御剑精选集 — 自动存档提示 | ![御剑精选集 — 语言设置](docs/images/aai_language.jpg)<br>御剑精选集 — 语言设置 |
 
 需要 iOS / iPadOS 26 或更高版本。其他游戏暂不支持。脚本会为它们写一份分析报告，并猜测游戏的设置，尽力打出一个 IPA；这样的 IPA 可能启动不了。
 
