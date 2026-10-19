@@ -34,12 +34,13 @@ void dm_touch_set(const dm_touch *t, int n) {
 
 static int32_t clampi(float v, int hi) { int32_t r = (int32_t)(v * (float)(hi + 1)); return r < 0 ? 0 : r > hi ? hi : r; }
 // Fill one TouchScreenState<16> (out is 0x290 bytes); now_ns is used for delta_time. Returns the number of touch points written
-int touch_fill(void *out, uint64_t now_ns) {
-    uint8_t *o = out; memset(o, 0, 0x290);
+int touch_fill_n(void *out, int maxn, uint64_t now_ns) {
+    if (maxn < 1) maxn = 1; if (maxn > 16) maxn = 16;
+    uint8_t *o = out; memset(o, 0, 0x10 + 0x28 * (size_t)maxn);   // TouchScreenState<N>: 16-byte header + N * 0x28
     pthread_mutex_lock(&g_tl);
     int64_t samp = ++g_tsamp; int64_t dt = g_tlast_ns ? (int64_t)(now_ns - g_tlast_ns) : 0; g_tlast_ns = now_ns;
     int k = 0;
-    for (int id = 0; id < 16; id++) {
+    for (int id = 0; id < 16 && k < maxn; id++) {
         if (g_f[id].st == F_EMPTY) continue;
         uint32_t attr = 0;
         if (!g_f[id].reported) { attr |= 1; g_f[id].reported = 1; }          // Start (reported for the first time this time)
@@ -65,3 +66,4 @@ int touch_fill(void *out, uint64_t now_ns) {
     }
     return k;
 }
+int touch_fill(void *out, uint64_t now_ns) { return touch_fill_n(out, 16, now_ns); }

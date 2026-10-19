@@ -253,12 +253,14 @@ HLE_FORCE("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "�
 HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideEv", "腕带说明小程序；宿主不显示", Result, h_hid_Strap, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUpdateArgE", "手柄固件更新小程序；宿主不显示", Result, h_hid_FwUpd, const void *arg) { (void)arg; return RES_OK; }
 
-// Touch screen: TouchScreenState<N> = { int64 sampling number; int32 count; int32 reserved; TouchState[N] }. Report 0 touch points for now (only the 16-byte header is written)
-static void touch_head(void *s) { int64_t *p = s; p[0] = atomic_fetch_add(&g_sampling, 1) + 1; ((int32_t *)s)[2] = 0; ((int32_t *)s)[3] = 0; }
-HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEv", "连 hid 触屏；宿主暂报无触点", void, h_hid_InitTouch, void) {}
+// Touch screen: TouchScreenState<N> = { int64 sampling number; int32 count; int32 reserved; TouchState[N] } (0x28 per point,
+// see hle_touch.c). The front end's mouse becomes touch point 0; the panel is 1280x720.
+int touch_fill_n(void *out, int maxn, uint64_t now_ns);
+static uint64_t touch_now_ns(void) { extern uint64_t now_ns(void); return now_ns(); }
+HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEv", "连 hid 触屏", void, h_hid_InitTouch, void) {}
 #define TOUCH(N) \
-    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "触屏当前状态：0 个触点", void, h_hid_Touch1_##N, void *s) { touch_head(s); } \
-    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "触屏状态：1 条、0 个触点", int, h_hid_TouchN_##N, void *s, int n) { if (n <= 0) return 0; touch_head(s); return 1; }
+    HLE_FORCE("_ZN2nn3hid19GetTouchScreenStateILm" #N "EEEvPNS0_16TouchScreenStateIXT_EEE", "触屏当前状态（前端鼠标 → 触点 0）", void, h_hid_Touch1_##N, void *s) { touch_fill_n(s, N, touch_now_ns()); } \
+    HLE_FORCE("_ZN2nn3hid20GetTouchScreenStatesILm" #N "EEEiPNS0_16TouchScreenStateIXT_EEEi", "触屏状态（前端鼠标 → 触点 0）", int, h_hid_TouchN_##N, void *s, int n) { if (n <= 0) return 0; touch_fill_n(s, N, touch_now_ns()); return 1; }
 TOUCH(1) TOUCH(2) TOUCH(3) TOUCH(4) TOUCH(5) TOUCH(6) TOUCH(7) TOUCH(8) TOUCH(9) TOUCH(10) TOUCH(11) TOUCH(12) TOUCH(13) TOUCH(14) TOUCH(15) TOUCH(16)
 HLE_FORCE("_ZN2nn3hid17InitializeGestureEv", "手势；宿主不提供", void, h_hid_InitGesture, void) {}
 HLE_FORCE("_ZN2nn3hid16GetGestureStatesEPNS0_12GestureStateEi", "手势状态：0 条", int, h_hid_Gestures, void *out, int n) { (void)out; (void)n; return 0; }
