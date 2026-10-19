@@ -1355,6 +1355,18 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         if (ser == -2) { ser = -1; const char *e = getenv("DM_TEX_REUPLOAD"); if (e) { char b[128]; int n = sscanf(e, "%lld:%lld", &ser, &at); if (n < 1) ser = -1; (void)b; } }
         if (ser >= 0 && !done && (long long)t->serial == ser && (long long)atomic_load(&g_cur_frame) >= at) { done = 1; serial_del(t->serial); MLOG("[texredo] 重传 ser=%lld（帧 %lld）", ser, at); }
     }
+    {   // DM_TEX_REFRESH=WxH[:every] diagnostic: forget the cached MTLTexture of every texture of that size every <every> frames (default 1), so the
+        // upload path reads the guest storage again. A texture that the engine fills after its first use keeps the stale upload otherwise; this tells
+        // whether the guest storage has the right content (only the upload is missing) or is black itself.
+        static int rr = -1; static uint32_t rw = 0, rh = 0; static int every = 1; static uint64_t lastf = ~0ull; static int logged;
+        if (rr < 0) { rr = 0; const char *e = getenv("DM_TEX_REFRESH");
+            if (e) { int n = sscanf(e, "%ux%u:%d", &rw, &rh, &every); rr = n >= 2 && rw && rh; if (rr && every < 1) every = 1; } }
+        if (rr && t->d.width == rw && t->d.height == rh && t->d.levels == 1) {
+            uint64_t f = atomic_load(&g_cur_frame);
+            if (lastf == ~0ull || f >= lastf + (uint64_t)every) { lastf = f; serial_del(t->serial);
+                if (!logged++) MLOG("[texredo] 每 %d 帧重传 %ux%u 的贴图（首例 ser=%llu）", every, rw, rh, (unsigned long long)t->serial); }
+        }
+    }
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(70, "贴图对象已失效（magic %#x，首例 ser=%llu）：不建 MTLTexture", t->magic, (unsigned long long)t->serial); return nil; }
     int packaged = (t->has_layout || tex_cpu_written(t->serial)) && t->mem;
     // Virtual-pool textures are filled by the engine through the aliased physical pages (compressed formats cannot be zero-copy linear textures), so
@@ -6175,12 +6187,15 @@ static void td_dump(void) {
         for (; q && *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) {
             if (!strncmp(q, "big", 3)) {
                 int min = atoi(q + 3); if (min <= 0) min = 1024;
-                uint64_t ser[24]; uint32_t fmt[24], ww[24], hh[24]; int n = 0;
+                enum { ND = 64 };
+                uint64_t ser[ND]; uint32_t fmt[ND], ww[ND], hh[ND], up[ND]; int n = 0;
                 pthread_mutex_lock(&g_rmu);
-                for (int i = 0; i < g_ntreg && n < 24; i++) {
+                for (int i = 0; i < g_ntreg && n < ND; i++) {
                     const tex_t *t = &g_treg[i].t;
                     if (!g_treg[i].ok || !t->serial || t->d.width < (uint32_t)min || t->d.height < (uint32_t)min || (t->d.flags & 8)) continue;
-                    ser[n] = t->serial; fmt[n] = t->d.format; ww[n] = t->d.width; hh[n] = t->d.height; n++;
+                    int dup = 0; for (int k = 0; k < n; k++) if (ser[k] == t->serial) dup = 1;
+                    if (dup) continue;
+                    ser[n] = t->serial; fmt[n] = t->d.format; ww[n] = t->d.width; hh[n] = t->d.height; up[n] = 0; n++;
                 }
                 pthread_mutex_unlock(&g_rmu);
                 for (int i = 0; i < n; i++) {
