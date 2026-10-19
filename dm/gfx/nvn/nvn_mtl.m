@@ -309,7 +309,9 @@ void mtl_init(void) {
     }
     g_ev = [g_dev newSharedEvent];
     g_keep = [NSMutableArray array];
+
     g_nvn_deswz_gpu = nvn_deswz_gpu_init(g_dev) == 0;
+
     if (getenv("DM_NVN_DESWZ_CPU") && *getenv("DM_NVN_DESWZ_CPU") && strcmp(getenv("DM_NVN_DESWZ_CPU"), "0")) g_nvn_deswz_gpu = 0;   // diagnostic: force the CPU deswizzler
     dm_res_report_register(mtl_res_counts);
     if (!g_nvn_deswz_gpu) MLOG("【红】显卡解排布初始化失败，预排布贴图回退 CPU");
@@ -1156,6 +1158,48 @@ static void up_blit_add(id<MTLBuffer> src, size_t off, size_t row, size_t image,
     }
     g_up_blits[g_nup_blits++] = (up_blit){src, off, row, image, size, dst, slice, level};
 }
+
+// DM_DESWZ_SELFTEST=1: run both deswizzlers over identical pseudo-random source bytes and diff them. The source does not have to be a valid
+// image: both implementations must apply the same permutation, so any difference is a bug in one of them. Reports, per size, how many bytes differ,
+// the first difference and the row/column extent of the differences (a period along x or y points at the responsible address bit).
+void deswz_selftest_now(void) {
+    struct { uint32_t w, h; } cs[] = {{512,512},{1024,1024},{2048,1024},{2048,2048},{2048,4096},{4096,2048},{3144,3144},{4096,4096}};
+    for (unsigned ci = 0; ci < sizeof cs / sizeof *cs; ci++) {
+        nvn_texdesc d; memset(&d, 0, sizeof d);
+        d.target = 1; d.format = 0x4d; d.width = cs[ci].w; d.height = cs[ci].h; d.depth = 1; d.levels = 1;   // BC7
+        uint32_t row_bytes = 0, rows = 0, slices = 0, bpb = 0; uint64_t base = 0; unsigned th = 0, td = 0;
+        if (nvn_deswizzle_geom(&d, 0, 0, &row_bytes, &rows, &slices, &base, &th, &td, &bpb)) { MLOG("[deswztest] %ux%u 几何失败", cs[ci].w, cs[ci].h); continue; }
+        // The swizzled layout needs whole 512-byte GOB blocks: rows are padded up to 8*bh and row_bytes up to 64, so the real span can be
+        // larger than the tight row_bytes*rows (AA456's 3144x3144 page: 7 * 197 * 8192 = 11,296,768 = exactly the storage the game allocates)
+        uint64_t bh_ = 1ull << th, bd_ = 1ull << td, gob_x_ = ((uint64_t)row_bytes + 63) / 64, blk_y_ = ((uint64_t)rows + 8 * bh_ - 1) / (8 * bh_);
+        size_t span = (size_t)(blk_y_ * gob_x_ * (512ull * bh_ * bd_));
+        size_t bytes = (size_t)base + (span > (size_t)row_bytes * rows ? span : (size_t)row_bytes * rows) + (512u << 4);
+        uint8_t *src = malloc(bytes), *dc = calloc(1, bytes), *dg = (uint8_t *)calloc(1, bytes);
+        if (!src || !dc || !dg) { free(src); free(dc); free(dg); MLOG("[deswztest] 内存不够 %ux%u", cs[ci].w, cs[ci].h); continue; }
+        for (size_t i = 0; i < bytes; i++) src[i] = (uint8_t)((i * 2654435761u) >> 13);
+        int rc = nvn_deswizzle(&d, 0, 0, src, dc, row_bytes);
+        id<MTLBuffer> bs = [g_dev newBufferWithBytes:src length:bytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bd = [g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> cb = q_cb();
+        id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+        int rg = nvn_deswz_gpu_encode(ce, bs, 0, &d, 0, 0, bd, 0, row_bytes);
+        [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        memcpy(dg, bd.contents, bytes);
+        size_t nd = 0, first = ~0ull, xmin = ~0ull, xmax = 0, ymin = ~0ull, ymax = 0, nd16 = 0;
+        for (uint32_t y = 0; y < rows; y++) for (uint32_t x = 0; x < row_bytes; x++) {
+            size_t o = (size_t)y * row_bytes + x;
+            if (dc[o] != dg[o]) { nd++; if (first == ~0ull) first = o; if (x < xmin) xmin = x; if (x > xmax) xmax = x; if (y < ymin) ymin = y; if (y > ymax) ymax = y; }
+            }
+        for (size_t o = 0; o < (size_t)row_bytes * rows; o += 16) { if (memcmp(dc + o, dg + o, 16)) nd16++; }
+        MLOG("[deswztest] %ux%u 格式 %#x 行 %ux%u 片 %u th=%u td=%u 返回 CPU=%d GPU=%d：不同字节 %zu（16 字节段 %zu），首个 %llu（行 %llu 列 %llu），"
+             "不同范围 行 %llu..%llu 列 %llu..%llu",
+             cs[ci].w, cs[ci].h, d.format, row_bytes, rows, slices, th, td, rc, rg, nd, nd16,
+             (unsigned long long)first, (unsigned long long)(first / row_bytes), (unsigned long long)(first % row_bytes),
+             (unsigned long long)(nd ? ymin : 0), (unsigned long long)(nd ? ymax : 0), (unsigned long long)(nd ? xmin : 0), (unsigned long long)(nd ? xmax : 0));
+        free(src); free(dc); free(dg);
+    }
+}
+
 
 static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp);
 static id<MTLTexture> pkg_upload(const tex_t *t, uint64_t *stamp) {
@@ -6271,6 +6315,7 @@ static void td_dump(void) {
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sp = [g_dev newSamplerStateWithDescriptor:sd];
         if (!ps) { MLOG("【红】TEXDUMP 管线失败 %s", e.localizedDescription.UTF8String); return; }
     }
+    { const char *e = getenv("DM_DESWZ_SELFTEST"); if (e && *e && strcmp(e, "0")) { void deswz_selftest_now(void); deswz_selftest_now(); } }
     MLOG("[texdump] 帧 %ld 共 %lu 张颜色目标", g_td_frame, (unsigned long)g_td_list.count);
     {   // DM_TEXDUMP_EXTRA=serial[,serial...] or big<size>: also save these *sampled* textures (not render targets) at the same frame, through the same
         // sample-to-RGBA8 path (a black region of an atlas is otherwise only visible as black pixels in the picture it is drawn into).
