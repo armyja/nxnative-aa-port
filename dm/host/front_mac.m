@@ -207,17 +207,24 @@ void front_run(void (*guest)(void)) {
         // Mouse as a single-point touchscreen (for testing touch on the local machine, front.h dm_touch_set): left button down / drag = finger 0 at the normalized coordinates, release = lifted
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;
-            if (e.type == NSEventTypeLeftMouseDown) {   // green button = one click fullscreen (AppKit would open the tiling menu instead)
+            // Who owns the current drag: decided by where the button went down, not by where the cursor is now.
+            // A live resize that starts on the window border must keep every drag, even while the cursor crosses
+            // the game view, otherwise the resize freezes.
+            static int owner;   // 0 none, 1 touch (started in the game view), 2 system (title bar / border / buttons)
+            NSRect vf = [v convertRect:v.bounds toView:nil];
+            BOOL inView = NSPointInRect(e.locationInWindow, vf);
+            if (e.type == NSEventTypeLeftMouseDown) {
                 NSButton *zoom = [win standardWindowButton:NSWindowZoomButton];
                 if (zoom && !zoom.hidden && NSPointInRect(e.locationInWindow, [zoom convertRect:zoom.bounds toView:nil])) {
                     LOG("[窗口] 绿色按钮 → %s全屏", win.styleMask & NSWindowStyleMaskFullScreen ? "退出" : "进入");
-                    fs_toggle(win); return nil;
+                    owner = 2; fs_toggle(win); return nil;
                 }
+                owner = inView ? 1 : 2;
+                if (owner == 2) return e;   // title bar, traffic lights and the resize border go to AppKit
             }
-            NSRect vf = [v convertRect:v.bounds toView:nil];
-            BOOL inView = NSPointInRect(e.locationInWindow, vf);
-            if (e.type == NSEventTypeLeftMouseUp) { dm_touch_set(NULL, 0); return inView ? nil : e; }
-            if (!inView) return e;   // title bar, traffic lights and the resize border go to AppKit (swallowing them broke both the close button and live resize)
+            if (e.type == NSEventTypeLeftMouseUp) { int o = owner; owner = 0; dm_touch_set(NULL, 0); return o == 1 ? nil : e; }
+            if (owner == 2) return e;   // a system drag (live resize / window move): never swallow it
+            if (!inView) return e;
             NSPoint p = [v convertPoint:e.locationInWindow fromView:nil]; NSSize sz = v.bounds.size;
             if (sz.width <= 0 || sz.height <= 0) return e;
             dm_touch t = {0, (float)(p.x / sz.width), (float)(1.0 - p.y / sz.height)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
