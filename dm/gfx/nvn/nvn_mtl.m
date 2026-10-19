@@ -1239,7 +1239,30 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
     if (gdec) for (unsigned l = 0; l < d.mipmapLevelCount; l++) { uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u); ctotal += (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * layers; }
     int big_cpu = DM_GAME_DESWZ_CPU_MIN > 0 && bpb > 0 && bw > 0 &&
                   ((int)t->d.width >= DM_GAME_DESWZ_CPU_MIN || (int)t->d.height >= DM_GAME_DESWZ_CPU_MIN);   // GPU deswizzler mis-decodes the huge pages, CPU one is right
-    int use_gpu = (!unp || gdec) && g_nvn_deswz_gpu && !big_cpu && mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo);
+    { const char *e = getenv("DM_NVN_DESWZ_GPU"); if (e && *e && strcmp(e, "0")) big_cpu = 0; }   // diagnostic: force the GPU deswizzler
+    // The GPU deswizzle reads the source as one contiguous MTLBuffer. Virtual-pool textures larger than one mapping (4 MB) span several
+    // buffers, so only the first part would be readable and the rest would decode from out-of-bounds memory: check the span and fall back to CPU.
+    int span_ok = 0;
+    if (g_nvn_deswz_gpu && (!unp || gdec)) {
+        uint32_t bw2, bh2, bpb2 = nvn_fmt_bpb(t->d.format, &bw2, &bh2);
+        if (bpb2) {
+            uint64_t bh_ = 1ull << 0, bd_ = 1ull;
+            unsigned th2 = 0, td2 = 0, bpb3; uint32_t rb, rw, sl; uint64_t bs;
+            (void)bpb3; (void)bs; (void)sl;
+            if (!nvn_deswizzle_geom(&t->d, 0, 0, &rb, &rw, &sl, &bs, &th2, &td2, &bpb3)) {
+                bh_ = 1ull << th2; bd_ = 1ull << td2;
+                uint64_t gx = ((uint64_t)rb + 63) / 64, by = ((uint64_t)rw + 8 * bh_ - 1) / (8 * bh_);
+                uint64_t span = by * gx * (512ull * bh_ * bd_);
+                if (span < (uint64_t)rb * rw) span = (uint64_t)rb * rw;
+                void *m2; uint64_t o2;
+                span_ok = mtl_addr((uint64_t)t->mem, (uint64_t)t->L.size, &m2, &o2) &&
+                          o2 + span <= (uint64_t)((__bridge id<MTLBuffer>)m2).length;
+                if (!span_ok) { static int once; if (!once++) MLOG("解排布：%ux%u 的存储跨度 %llu 超过单个缓冲（%llu，偏移 %#llx），改走 CPU",
+                    t->d.width, t->d.height, (unsigned long long)span, (unsigned long long)((__bridge id<MTLBuffer>)m2).length, (unsigned long long)o2); }
+            }
+        }
+    }
+    int use_gpu = (!unp || gdec) && g_nvn_deswz_gpu && !big_cpu && span_ok && mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo);
     if (g_nvn_deswz_gpu && !use_gpu && !unp) RED_ONCE(40, "预排布贴图存储不在内存池里，回退 CPU");
     if (use_gpu) {
         // The GPU reads the memory pool at execution time, which is closer to a real Switch than a snapshot at CPU upload time; the dirty-page stamp is still taken before encoding, and later writes still trigger a re-upload.
