@@ -653,6 +653,15 @@ void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
 // Inline uniform update (UpdateUniformBuffer): the data is copied into the host's own shared ring at encode time, then copied in order to the destination.
 // Previously it was read from command memory only when the GPU executed - if the game recycles command memory before the GPU runs, it reads the bytes of the next batch of commands (SMBW's fountain water wave simulation got the wrong coefficients and diverged to ±65504).
 static id<MTLBuffer> g_ubs_buf; static size_t g_ubs_off, g_ubs_size;
+// DM_UB_STAGE=1: instead of blitting each uniform update into the guest buffer (which ends the render pass and blocks same-target pass merging),
+// remember where the staged bytes are and bind that staging copy for the draws that read this range. The staging ring outlives the submission.
+typedef struct { uint64_t lo, hi; id<MTLBuffer> buf; uint64_t off; } ub_stage;
+static ub_stage g_ubs[128]; static int g_nubs; static int g_ubs_on = -1;
+static int ub_stage_hit(uint64_t addr, uint64_t size, __unsafe_unretained id<MTLBuffer> *buf, uint64_t *off) {
+    if (g_ubs_on <= 0) return 0;
+    for (int i = 0; i < g_nubs; i++) if (g_ubs[i].lo <= addr && g_ubs[i].hi >= addr + size) { *buf = g_ubs[i].buf; *off = g_ubs[i].off + (addr - g_ubs[i].lo); return 1; }
+    return 0;
+}
 void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
     if (!n) return;
     if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1;
@@ -667,7 +676,12 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
         res_add(g_ubs_buf); g_ubs_off = 0;
     }
     memcpy((uint8_t *)g_ubs_buf.contents + g_ubs_off, data, n);
-    enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), g_ubs_buf, g_ubs_off, (__bridge id<MTLBuffer>)db, dof, n);
+    if (g_ubs_on < 0) { const char *e = getenv("DM_UB_STAGE"); g_ubs_on = e && *e && strcmp(e, "0"); }
+    if (g_ubs_on && g_nubs < 128) {   // bind the staged copy instead of copying into the guest buffer (keeps the render pass open)
+        g_ubs[g_nubs].lo = dst; g_ubs[g_nubs].hi = dst + n; g_ubs[g_nubs].buf = g_ubs_buf; g_ubs[g_nubs].off = g_ubs_off; g_nubs++;
+    } else {
+        enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), g_ubs_buf, g_ubs_off, (__bridge id<MTLBuffer>)db, dof, n);
+    }
     g_ubs_off += need;
 }
 
@@ -796,6 +810,7 @@ int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1) {
 static void rp_flush(void);
 static const char *cctx_snap(void);   // What is in this submission (printed into the failure line on error; defined before mtl_exec)
 uint64_t mtl_sub_commit(void) {
+    g_nubs = 0;   // staging records only apply to this submission
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
     rp_flush();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
@@ -3304,6 +3319,7 @@ static uint32_t ubo_handle(int stage, int reg, int off) {
     if (!mtl_addr(u->addr + off, 4, &mb, &mo) || !(base = [(__bridge id<MTLBuffer>)mb contents])) return 0;
     uint32_t h; memcpy(&h, base + mo, 4); return h;
 }
+static __unsafe_unretained id<MTLBuffer> g_ub_hit_buf; static uint64_t g_ub_hit_off;
 static uint32_t g_dispatch_dim[3];   // the current dispatch's workgroup counts (driver segment c0 + 0x200 for compute)
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex);
 static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
@@ -3328,7 +3344,9 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         if (b->kind == NVN_RB_CBUF) {
             const p_bind_buf *u = reg < 16 ? &S.ubo[nvn_stage][reg] : NULL;
             void *mb; uint64_t mo, gpu;
-            if (!u || !u->addr || !mtl_gpu_addr(u->addr, 1, &mb, &mo, &gpu)) { RED_ONCE(16, "阶段 %d cb%d 没有绑定 uniform 缓冲", nvn_stage, reg); continue; }
+            if (u && u->addr && ub_stage_hit(u->addr, u->size, &g_ub_hit_buf, &g_ub_hit_off)) {
+                mb = (__bridge void *)g_ub_hit_buf; mo = g_ub_hit_off; gpu = g_ub_hit_buf.gpuAddress + g_ub_hit_off;
+            } else if (!u || !u->addr || !mtl_gpu_addr(u->addr, 1, &mb, &mo, &gpu)) { RED_ONCE(16, "阶段 %d cb%d 没有绑定 uniform 缓冲", nvn_stage, reg); continue; }
             use_rec("buf", u->addr, u->size, 0, NULL);
             if (nvn_stage == 0 && reg == 0 && g_ui_moff != 0) { uint64_t pg = ui_mat_patch(u, mb, mo); if (pg) gpu = pg; }
             if (bl) {
