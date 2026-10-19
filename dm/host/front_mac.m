@@ -108,6 +108,7 @@ static void window_fit(NSWindow *w, double factor) {
     int pw = 0, ph = 0; int mtl_pic_size(int *w, int *h);
     if (!mtl_pic_size(&pw, &ph)) return;
     double sc = w.backingScaleFactor > 0 ? w.backingScaleFactor : 1.0;
+    if (factor < 0) { pw = 1920; ph = 1080; factor = 1.0; }   // fixed 1080p drawable: the bigger picture is downscaled (supersampling)
     if (factor <= 0) factor = 1.0;
     NSSize want = NSMakeSize(pw * factor / sc, ph * factor / sc);
     NSRect c = [w contentRectForFrameRect:w.frame];
@@ -151,8 +152,10 @@ void front_run(void (*guest)(void)) {
                 NSMenu *wMenu = [[NSMenu alloc] initWithTitle:@"Window Size"];
                 NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:@"1:1 (picture pixels, sharpest)" action:@selector(pick:) keyEquivalent:@""];
                 it.target = tgt; it.representedObject = @(0.0); [wMenu addItem:it];
-                it = [[NSMenuItem alloc] initWithTitle:@"2x (supersampled, soft)" action:@selector(pick:) keyEquivalent:@""];
+                it = [[NSMenuItem alloc] initWithTitle:@"2x (bigger, sharper text)" action:@selector(pick:) keyEquivalent:@""];
                 it.target = tgt; it.representedObject = @(2.0); [wMenu addItem:it];
+                it = [[NSMenuItem alloc] initWithTitle:@"1080p (supersampled: smooth art, crisp text)" action:@selector(pick:) keyEquivalent:@""];
+                it.target = tgt; it.representedObject = @(-1080.0); [wMenu addItem:it];   // negative = fixed 1080p window
                 wItem.submenu = wMenu; [viewMenu addItem:wItem];
             }
             viewItem.submenu = viewMenu;

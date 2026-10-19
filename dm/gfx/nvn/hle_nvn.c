@@ -26,6 +26,8 @@
 #include <mach/mach_vm.h>
 static void res_override_early(void);   // render resolution override, applied at the first NVN call
 static int res_override_screen(void);
+static void res_override_screen_read(int *w, int *h);
+static void res_probe_chain(void);
 extern int g_res_w, g_res_h;
 #include <pthread.h>
 #include <TargetConditionals.h>
@@ -420,7 +422,15 @@ NVN(nvnSamplerBuilderGetWrapMode, void, const NVNsamplerBuilder *b, NVNwrapMode 
     const samp_par *o = &((const samp_builder_t *)b)->p; *s = (NVNwrapMode)o->ws; *t = (NVNwrapMode)o->wt; *r = (NVNwrapMode)o->wr;
 }
 NVN(nvnSamplerInitialize, NVNboolean, NVNsampler *s, const NVNsamplerBuilder *b) {
-    samp_t *o = (samp_t *)s; o->magic = MAGIC('S', 'M', 'P', 0); o->p = ((const samp_builder_t *)b)->p; return 1;
+    samp_t *o = (samp_t *)s; o->magic = MAGIC('S', 'M', 'P', 0); o->p = ((const samp_builder_t *)b)->p;
+    // Resolution override smoothing: at a higher output resolution the game's art is magnified, and its nearest-filtered
+    // samplers turn the character/背景 outlines into stair steps. Switch those to linear (DM_RES_SMOOTH=0 keeps them).
+    if ((g_res_w != 1920 || g_res_h != 1080) && !getenv("DM_RES_SMOOTH_OFF")) {
+        if (o->p.magf == 0) o->p.magf = 1;                       // NEAREST -> LINEAR
+        if (o->p.minf == 0 || o->p.minf == 2 || o->p.minf == 4) o->p.minf += 1;   // *nearest* mip modes -> their linear counterparts
+        if (getenv("DM_NVN_SAMPLOG")) { static int n; if (n++ < 40) LOG("[sampler] 平滑后 min=%d mag=%d", o->p.minf, o->p.magf); }
+    } else if (getenv("DM_NVN_SAMPLOG")) { static int n; if (n++ < 40) LOG("[sampler] min=%d mag=%d aniso=%.1f", o->p.minf, o->p.magf, o->p.aniso); }
+    return 1;
 }
 NVN(nvnSamplerFinalize, void, NVNsampler *s) { ((samp_t *)s)->magic = 0; }
 
@@ -1071,6 +1081,7 @@ static void sizetrace_rect(const char *what, int x, int y, int w, int h, void *l
 }
 NVN(nvnWindowSetCrop, void, NVNwindow *w, int x, int y, int ww, int hh) {
     if (sizetrace_want()) sizetrace_rect("crop", x, y, ww, hh, __builtin_return_address(0));
+    if (g_res_w != 1920 || g_res_h != 1080) res_probe_chain();
     if (res_override_screen() && (ww != g_res_w || hh != g_res_h)) { LOG("[分辨率] 裁剪 %d,%d %dx%d → %d,%d %dx%d", x, y, ww, hh, x, y, g_res_w, g_res_h); ww = g_res_w; hh = g_res_h; }
     win_t *o = (win_t *)w; int v[4] = {x, y, ww, hh};
     if (memcmp(o->crop, v, sizeof v)) LOG("[nvn] WindowCrop %d,%d %dx%d", x, y, ww, hh);
@@ -1122,7 +1133,9 @@ NVN(nvnQueueAcquireTexture, NVNqueueAcquireTextureResult, NVNqueue *q, NVNwindow
 // Frame boundary: on each present, print / write to disk the call count of each NVN function for this frame
 static uint64_t g_prev[NVN_NFUNC];
 static FILE *g_tsv;
+static void res_override_tick(void);   // keeps the screen-size singleton at the requested size (see below)
 static void dump_frame(void) {
+    res_override_tick();
     static int inited, nframes = 3, calls = 1;
     if (!inited) {
         inited = 1;
@@ -1654,9 +1667,51 @@ static void patch_movz32(uint8_t *code, uint64_t off, uint32_t expect, uint32_t 
 }
 int g_res_w = 1920, g_res_h = 1080;   // requested output size (1920x1080 = override off)
 static void res_override_early(void) { res_override_maybe(); }
+void dm_res_override_install(void) { res_override_maybe(); }   // called right after the modules are loaded (main.c)
 // The engine keeps its screen size in a singleton: [main+0xa27b920 + 0x218] -> object, {w,h} at object+0x498
 // (found by disassembling the crop call site main+0x3806950: ldp w3,w4,[x8] with x8 = *(*(img+0xa27b920+0x218)+0x498)).
 // Once the engine has created it, overwrite the pair so the crop, the viewports and the UI canvas follow.
+// Called once per frame: the engine may fill the singleton after the first crop, so keep it at the requested size and
+// report every transition (it tells us who wins and when the engine reads it).
+static void res_override_tick(void) {
+    static int16_t last_w, last_h; static int n;
+    if (g_res_w == 1920 && g_res_h == 1080) return;
+    int before_w = 0, before_h = 0;
+    res_override_screen_read(&before_w, &before_h);
+    res_override_screen();
+    int after_w = 0, after_h = 0; res_override_screen_read(&after_w, &after_h);
+    if ((before_w != last_w || before_h != last_h) && n++ < 8) {
+        LOG("[分辨率] 屏幕尺寸全局 帧内值 %dx%d → 改写后 %dx%d", before_w, before_h, after_w, after_h);
+        last_w = before_w; last_h = before_h;
+    }
+}
+// Reads the engine's screen size (0 if the singleton does not exist yet)
+// One-shot probe of the pointer chain into the engine's crop size (see the crop call site)
+static void res_probe_chain(void) {
+    static int done; if (done) return; done = 1;
+    uint8_t *base = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) base = g_mod[i].base;
+    if (!base) return;
+    uint64_t obj = *(uint64_t *)(base + 0xa27b920 + 0x218);
+    LOG("[probe] obj=%#llx", (unsigned long long)obj);
+    if (obj < 0x10000) return;
+    for (int i = 0; i < 4; i++) LOG("[probe] obj[%d]=%#llx", i, (unsigned long long)((uint64_t *)obj)[i]);
+    uint64_t v = *(uint64_t *)(uintptr_t)(obj + 0x1268);
+    LOG("[probe] *(obj+0x1268)=%#llx", (unsigned long long)v);
+    if (v >= 0x10000) { int *q = (int *)(uintptr_t)(v + 0x120); LOG("[probe] *(v+0x120)={%d,%d}", q[0], q[1]); }
+    uint64_t v2 = *(uint64_t *)(uintptr_t)(obj + 0x498);
+    LOG("[probe] *(obj+0x498)=%#llx", (unsigned long long)v2);
+    if (v2 >= 0x10000) { int *q = (int *)(uintptr_t)v2; LOG("[probe] *(*(obj+0x498))={%d,%d}", q[0], q[1]); }
+}
+static void res_override_screen_read(int *w, int *h) {
+    *w = *h = 0;
+    uint8_t *base = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) base = g_mod[i].base;
+    if (!base) return;
+    uint64_t obj = *(uint64_t *)(base + 0xa27b920 + 0x218);
+    if (obj < 0x10000) return;
+    uint64_t pair = *(uint64_t *)(uintptr_t)(obj + 0x498);   // the field at +0x498 is a pointer to {w,h}
+    if (pair < 0x10000) return;
+    int *wh = (int *)(uintptr_t)pair; *w = wh[0]; *h = wh[1];
+}
 static int res_override_screen(void) {
     if (g_res_w == 1920 && g_res_h == 1080) return 0;
     uint8_t *base = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) base = g_mod[i].base;
@@ -1664,7 +1719,9 @@ static int res_override_screen(void) {
     uint64_t *slot = (uint64_t *)(base + 0xa27b920 + 0x218);
     uint64_t obj = *slot;
     if (obj < 0x10000) return 0;
-    int *wh = (int *)(uintptr_t)(obj + 0x498);
+    uint64_t pair = *(uint64_t *)(uintptr_t)(obj + 0x498);   // pointer to {w,h}
+    if (pair < 0x10000) return 0;
+    int *wh = (int *)(uintptr_t)pair;
     static int logged;
     if (wh[0] != g_res_w || wh[1] != g_res_h) {
         if (!logged) LOG("[分辨率] 屏幕尺寸全局 %dx%d → %dx%d", wh[0], wh[1], g_res_w, g_res_h);
@@ -1679,15 +1736,34 @@ static void res_override_maybe(void) {
     LOG("[分辨率] 覆盖检查：build=%s", dm_main_build());
     if (strcmp(dm_main_build(), "dbe49182fbca27691c65b23c9e105d1f")) return;   // addresses below belong to this build only
     int w = 1920, h = 1080;
-    { uint64_t r = front_game_res(1); double sc = dm_render_scale();   // profile render_scale / DM_RENDER_SCALE
-      if (sc > 0.1 && (sc < 0.999 || sc > 1.001)) { w = (int)((double)w * sc + 0.5); h = (int)((double)h * sc + 0.5); }
-      (void)r; }
+    { const char *e = getenv("DM_GAME_RES"); unsigned a = 0, b = 0;
+      if (e && sscanf(e, "%ux%u", &a, &b) == 2 && a >= 320 && b >= 240) { w = (int)a; h = (int)b; }   // explicit output size wins
+      else { double sc = dm_render_scale();   // profile render_scale / DM_RENDER_SCALE
+        if (sc > 0.1 && (sc < 0.999 || sc > 1.001)) { w = (int)(1920 * sc + 0.5); h = (int)(1080 * sc + 0.5); } } }
     LOG("[分辨率] 想要 %dx%d（缩放 %.3f）", w, h, dm_render_scale());
     if (w <= 0 || h <= 0 || (w == 1920 && h == 1080) || w > 4096 || h > 4096 || (w & 0xffff0000) || (h & 0xffff0000)) return;
     uint8_t *base = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) base = g_mod[i].base;
     if (!base) return;
-    patch_movz32(base, 0x3806310, 0x5280f001u, (uint32_t)w, 1);   // w1 = width
-    patch_movz32(base, 0x3806304, 0x52808702u, (uint32_t)h, 2);   // w2 = height
+    // Every immediate pair (1920, 1080) in the image is a screen-size setup: the swapchain builder at 0x380631x,
+    // the engine's own screen init at 0x380648x and the window/renderer setups listed below. Patch them all.
+    static const struct { uint32_t w_off, h_off; } sites[] = {
+        {0x3806310, 0x3806304}, {0x3806498, 0x3806488}, {0x2e691c, 0x2e6914}, {0x25d7e38, 0x25d7e28},
+        {0x25daca4, 0x25dacb0}, {0x25f4220, 0x25f422c}, {0x25f97a4, 0x25f97c8}, {0x25f97f0, 0x25f97c8},
+        {0x25fb550, 0x25fb574}, {0x25fb59c, 0x25fb574}, {0x2790c24, 0x2790bd4}, {0x2790c24, 0x2790c10},
+        {0x2790c24, 0x2790c84}, {0x2790ca4, 0x2790c84}, {0x28cdf70, 0x28cdf78}, {0x28ce0f8, 0x28ce100},
+        {0x2b9aa20, 0x2b9aa14}, {0x2b9ab9c, 0x2b9abb0}, {0x2c37acc, 0x2c37ad0},
+    };
+    int nw = 0, nh = 0;
+    for (unsigned i = 0; i < sizeof sites / sizeof sites[0]; i++) {
+        for (int k = 0; k < 2; k++) {
+            uint32_t off = k ? sites[i].h_off : sites[i].w_off, val = k ? (uint32_t)h : (uint32_t)w;
+            uint32_t cur = *(uint32_t *)(base + off);
+            uint32_t want_hi = k ? 0x52808700u : 0x5280f000u;
+            if ((cur & 0xffffffE0u) != want_hi) continue;   // not the movz we expect any more
+            if (k ? nh++ : nw++, 1) patch_movz32(base, off, cur, val, (int)(cur & 31));
+        }
+    }
+    LOG("[分辨率] 补丁 %d 处宽度立即数、%d 处高度立即数", nw, nh);
     g_res_w = w; g_res_h = h;
     LOG("[分辨率] 覆盖交换链尺寸 → %dx%d（%s）", w, h, getenv("DM_RENDER_SCALE") ? "DM_RENDER_SCALE" : "档案 render_scale");
 }

@@ -88,6 +88,7 @@ static void host_preload(int argc, char **argv) {
     if (i < argc && !strcmp(argv[i], "--")) for (i++; i < argc && g_argc < 63; i++) g_argv[g_argc++] = argv[i];
     if (!n) { static const char *def[] = DM_GAME_MODULES; for (int k = 0; k < DM_GAME_NMOD && n < MAX_MOD; k++) names[n++] = def[k]; }   // default module list from the game profile's modules (Mario: main sdk)
     load_modules(argv[1], names, n);
+    { void dm_res_override_install(void); dm_res_override_install(); }   // render resolution override (must be in before the guest caches its screen size)
     uint64_t ta = now_ns();
     probe_install();   // DM_PROBE probes (for diagnostics)
     ticks_install();   // DM_TICKS per-tick state hash (tick-entry observation gate)
