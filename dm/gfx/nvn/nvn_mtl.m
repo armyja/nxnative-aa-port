@@ -1548,6 +1548,7 @@ static uint64_t g_vd_addr, g_vd_size; static char g_vd_path[512]; static int g_v
 static FILE *g_vtbl; static long g_vt_frame = -1;
 static uint64_t g_smp[128]; static int g_smp_n; static uint64_t g_smp_f = ~0ull;   // pages sampled by the watched shader this frame (DM_TEXDUMP_EXTRA=all)   // DM_VBUF_DUMP per-draw table (frame, pass, baseVertex, page, uniform r1)
 static int g_last_bind_stages = -1;   // stage mask of the most recent program bind (diagnostic: what a dropped dispatch was bound with)
+unsigned g_watch_w, g_watch_h;   // DM_TEXWATCH=WxH watch target (extern from hle_nvn.c)
 static int g_kd_force;   // the draw DM_NVN_KEYDUMP matched: force the per-binding records on (see kd_draw)
 static int passdump(void) {
     if (g_kd_force) return 1;
@@ -2411,9 +2412,19 @@ static treg_t *g_treg; static int g_ntreg;
 void mtl_watch_tex(uint64_t off) {
     static int tick;
     if (++tick % 60) return;
+    // off = 0: watch by size instead (DM_TEXWATCH=WxH), because the virtual-pool offset is shared by several textures
     pthread_mutex_lock(&g_rmu);
     for (int i = 0; i < g_ntreg; i++) {
-        treg_t *r = &g_treg[i]; if (!r->ok || r->t.off != (ptrdiff_t)off) continue;
+        treg_t *r = &g_treg[i]; if (!r->ok) continue;
+        if (off ? r->t.off != (ptrdiff_t)off : !(r->t.d.width == g_watch_w && r->t.d.height == g_watch_h)) continue;
+        if (!off) {   // per-4MB segment non-zero counts: is the second half ever written?
+            uint64_t sz2 = r->t.L.size, seg[8] = {0}; int ns = (int)((sz2 + (4u << 20) - 1) / (4u << 20)); if (ns > 8) ns = 8;
+            if (r->t.mem) for (int g = 0; g < ns; g++) { uint64_t a = (uint64_t)g << 22, b2 = a + (4u << 20); if (b2 > sz2) b2 = sz2;
+                for (uint64_t k = a; k < b2; k++) seg[g] += r->t.mem[k] != 0; }
+            MLOG("[texwatch] 第 %d 次出图：ser=%llu %ux%u 段非零 %llu / %llu / %llu / %llu", tick, (unsigned long long)r->t.serial, r->t.d.width, r->t.d.height,
+                 (unsigned long long)seg[0], (unsigned long long)seg[1], (unsigned long long)seg[2], (unsigned long long)seg[3]);
+            continue;
+        }
         tex_t *t = &r->t; uint64_t nz = 0, sz = t->L.size;
         if (t->mem) for (uint64_t k = 0; k < sz && k < (8u << 20); k++) nz += t->mem[k] != 0;
         MLOG("[texwatch] 第 %d 次出图：id=%d ser=%llu pool=%p off=%#llx mem=%p size=%llu 非零 %llu", tick, i, (unsigned long long)t->serial, (void *)t->pool, (unsigned long long)t->off, (void *)t->mem, (unsigned long long)sz, (unsigned long long)nz);
@@ -6234,7 +6245,7 @@ static void td_dump(void) {
             "#include <metal_stdlib>\nusing namespace metal;\n"
             "struct V { float4 p [[position]]; float2 uv; };\n"
             "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }\n"
-            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { float4 c = t.sample(s, in.uv); return float4(c.rgb, 1); }\n";
+            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) { float4 c = t.sample(s, in.uv); return c; }   // keep alpha: whether a sprite region is transparent or opaque black decides whether a black rectangle is a blending bug\n";
         NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src_msl) options:nil error:&e];
         MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
         d.vertexFunction = [lib newFunctionWithName:@"vs"]; d.fragmentFunction = [lib newFunctionWithName:@"fs"];

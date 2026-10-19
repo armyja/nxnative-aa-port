@@ -1306,7 +1306,10 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     }
     {   // Diagnostic DM_TEXWATCH=<hex pool offset>: every 60 presents report that texture's storage non-zero count
         static uint64_t woff = 1; static int init;
-        if (!init) { init = 1; const char *e = getenv("DM_TEXWATCH"); woff = e ? strtoull(e, NULL, 16) : 0; }
+        if (!init) { init = 1; const char *e = getenv("DM_TEXWATCH");
+            if (e) { extern unsigned g_watch_w, g_watch_h; unsigned w = 0, h = 0;
+                if (sscanf(e, "%ux%u", &w, &h) == 2 && w && h) { g_watch_w = w; g_watch_h = h; woff = 1; }   // WxH: watch by size (the pool offset is shared)
+                else woff = strtoull(e, NULL, 16); } }
         if (woff) { void mtl_watch_tex(uint64_t); mtl_watch_tex(woff); }
     }
     gfx_enter();
