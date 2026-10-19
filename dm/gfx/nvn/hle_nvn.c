@@ -25,6 +25,8 @@
 #include <sys/mman.h>
 #include <mach/mach_vm.h>
 static void res_override_early(void);   // render resolution override, applied at the first NVN call
+static int res_override_screen(void);
+extern int g_res_w, g_res_h;
 #include <pthread.h>
 #include <TargetConditionals.h>
 #include <unistd.h>
@@ -1069,6 +1071,7 @@ static void sizetrace_rect(const char *what, int x, int y, int w, int h, void *l
 }
 NVN(nvnWindowSetCrop, void, NVNwindow *w, int x, int y, int ww, int hh) {
     if (sizetrace_want()) sizetrace_rect("crop", x, y, ww, hh, __builtin_return_address(0));
+    if (res_override_screen() && (ww != g_res_w || hh != g_res_h)) { LOG("[分辨率] 裁剪 %d,%d %dx%d → %d,%d %dx%d", x, y, ww, hh, x, y, g_res_w, g_res_h); ww = g_res_w; hh = g_res_h; }
     win_t *o = (win_t *)w; int v[4] = {x, y, ww, hh};
     if (memcmp(o->crop, v, sizeof v)) LOG("[nvn] WindowCrop %d,%d %dx%d", x, y, ww, hh);
     memcpy(o->crop, v, sizeof v);
@@ -1649,7 +1652,27 @@ static void patch_movz32(uint8_t *code, uint64_t off, uint32_t expect, uint32_t 
     vm_protect(mach_task_self(), a, pg, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     __builtin___clear_cache((char *)p, (char *)p + 4);
 }
+int g_res_w = 1920, g_res_h = 1080;   // requested output size (1920x1080 = override off)
 static void res_override_early(void) { res_override_maybe(); }
+// The engine keeps its screen size in a singleton: [main+0xa27b920 + 0x218] -> object, {w,h} at object+0x498
+// (found by disassembling the crop call site main+0x3806950: ldp w3,w4,[x8] with x8 = *(*(img+0xa27b920+0x218)+0x498)).
+// Once the engine has created it, overwrite the pair so the crop, the viewports and the UI canvas follow.
+static int res_override_screen(void) {
+    if (g_res_w == 1920 && g_res_h == 1080) return 0;
+    uint8_t *base = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) base = g_mod[i].base;
+    if (!base) return 0;
+    uint64_t *slot = (uint64_t *)(base + 0xa27b920 + 0x218);
+    uint64_t obj = *slot;
+    if (obj < 0x10000) return 0;
+    int *wh = (int *)(uintptr_t)(obj + 0x498);
+    static int logged;
+    if (wh[0] != g_res_w || wh[1] != g_res_h) {
+        if (!logged) LOG("[分辨率] 屏幕尺寸全局 %dx%d → %dx%d", wh[0], wh[1], g_res_w, g_res_h);
+        logged = 1;
+        wh[0] = g_res_w; wh[1] = g_res_h;
+    }
+    return 1;
+}
 static void res_override_maybe(void) {
     if (g_res_patched) return;
     g_res_patched = 1;
@@ -1665,6 +1688,7 @@ static void res_override_maybe(void) {
     if (!base) return;
     patch_movz32(base, 0x3806310, 0x5280f001u, (uint32_t)w, 1);   // w1 = width
     patch_movz32(base, 0x3806304, 0x52808702u, (uint32_t)h, 2);   // w2 = height
+    g_res_w = w; g_res_h = h;
     LOG("[分辨率] 覆盖交换链尺寸 → %dx%d（%s）", w, h, getenv("DM_RENDER_SCALE") ? "DM_RENDER_SCALE" : "档案 render_scale");
 }
 static int sizetrace_want(void) { static int n = -1; if (n < 0) { const char *e = getenv("DM_NVN_SIZETRACE"); n = e ? atoi(e) : 0; } return n; }
