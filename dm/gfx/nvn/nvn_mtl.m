@@ -1970,6 +1970,8 @@ static void lp_finish(void);
 // if during continuation a draw needs to sample them, or a clear arrives, the pass is ended before it, returning to the separate semantics. Copies / dispatches end the render encoder anyway
 static int g_enc_mode;          // How the current encoder was opened (rp_begin_ex argument: 0 all attachments 1 only for clears 2 depth omitted)
 static int g_rt_range_active, g_rt_range_pending;
+static uint64_t g_merge_ok, g_merge_no;
+static uint64_t g_mr_noenc, g_mr_mode, g_mr_pend, g_mr_nort, g_mr_notbdr, g_mr_diff, g_mr_other;   // merge refusal reasons (DM_MERGEDBG)   // passes continued on the same target / passes opened because the target changed
 static int g_rt_merged;         // The current pass has already been continued (at least one same-target SetRenderTargets was merged in)
 static uint64_t g_rt_merge_n;   // Cumulative continuation count
 static int g_defer_replaying;
@@ -2132,6 +2134,27 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         MTLRenderPassColorAttachmentDescriptor *c = pd.colorAttachments[i];
         if (!c.texture) continue;
         uint64_t b = att_bytes(c.texture, c.level); natt++; g_bw_store += b; if (c.loadAction == MTLLoadActionLoad) { g_bw_load += b; nload++; }
+        {   // DM_RTSTATS=1: per-target bandwidth ledger, logged every 300 frames (which targets cost the most, and whether their loads can go)
+            static int st = -1; if (st < 0) st = getenv("DM_RTSTATS") != NULL;
+            if (st) {
+                enum { NT = 24 }; static uint64_t ser[NT], bytes[NT], nm[NT]; static int n;
+                int k; for (k = 0; k < n; k++) if (ser[k] == R.rt.color[i]->serial) break;
+                if (k == n && n < NT) { ser[k] = R.rt.color[i]->serial; bytes[k] = 0; nm[k] = 0; n++; }
+                if (k < n) { bytes[k] += b + (c.loadAction == MTLLoadActionLoad ? b : 0); nm[k]++;
+                    if ((g_stat_pass & 0x3ff) == 0) {   // cheap periodic flush: print the top 6, then restart the ledger
+                        char line[512]; size_t o = 0;
+                        for (int t = 0; t < 6 && t < n; t++) { int bi = -1; for (int j = 0; j < n; j++) if (bytes[j] && (bi < 0 || bytes[j] > bytes[bi])) bi = j;
+                            if (bi < 0) break;
+                            o += snprintf(line + o, sizeof line - o, " ser=%llu %llu 趟 %llu MB；", (unsigned long long)ser[bi], (unsigned long long)nm[bi], (unsigned long long)(bytes[bi] >> 20));
+                            bytes[bi] = 0; nm[bi] = 0; }
+                        if (o) MLOG("[rtstats] 至帧 %llu 目标流量前 6：%s ｜ 续用 %llu 次 / 切目标 %llu 次", (unsigned long long)atomic_load(&g_cur_frame), line, (unsigned long long)g_merge_ok, (unsigned long long)g_merge_no);
+                        g_merge_ok = g_merge_no = 0;
+                        if (getenv("DM_MERGEDBG")) { MLOG("[mergedbg] 拒绝续用原因：未开编码 %llu / 编码模式 %llu / 有挂起清除 %llu / 无目标 %llu / 非 TBDH %llu / 目标不同 %llu / 其它 %llu",
+                            (unsigned long long)g_mr_noenc, (unsigned long long)g_mr_mode, (unsigned long long)g_mr_pend, (unsigned long long)g_mr_nort,
+                            (unsigned long long)g_mr_notbdr, (unsigned long long)g_mr_diff, (unsigned long long)g_mr_other);
+                            g_mr_noenc = g_mr_mode = g_mr_pend = g_mr_nort = g_mr_notbdr = g_mr_diff = g_mr_other = 0; }
+                    } }
+            } }
         if (R.rt.has_cview[i] && R.rt.cview[i].set_format) PD("V %llu c%d 视图格式 %#x（基贴图 NVN 格式 %#x）", g_stat_pass + 1, i, R.rt.cview[i].format, R.rt.color[i]->d.format);
         PD("P %llu c%d ser=%llu fmt=%lu %lux%lu ms%lu lv%lu sl%lu %s mtl=%p", g_stat_pass + 1, i, R.rt.color[i]->serial, (unsigned long)c.texture.pixelFormat,
            (unsigned long)c.texture.width, (unsigned long)c.texture.height, (unsigned long)c.texture.sampleCount, (unsigned long)c.level, (unsigned long)c.slice,
@@ -6126,10 +6149,14 @@ void mtl_exec(const uint8_t *p) {
                 if (g_enc && !pend && R.has_rt && tbdr_on() && rt_range_same(&R.rt,r)) {
                     g_rt_merged = g_rt_range_active = g_rt_range_pending = 1; R.rt = *r; break; }
                 if (g_enc && g_fz.active && g_fz.phase == 1 && fz_reuse_op(p) && !pend && g_enc_mode != 1 && R.has_rt && tbdr_on() && rt_same(&g_fz.rt1, r)) {
-                    g_rt_merged = 1; if (!g_rt_merge_n++) MLOG("同目标续用：首例 通道 %llu", g_stat_pass); PD("M %llu 同目标续用通道", g_stat_pass); break; }
+                    g_rt_merged = 1; g_merge_ok++; if (!g_rt_merge_n++) MLOG("同目标续用：首例 通道 %llu", g_stat_pass); PD("M %llu 同目标续用通道", g_stat_pass); break; }
                 // Do not continue a render pass opened only for a clear; one with fewer depth / stencil attachments can be continued (check the planes before drawing)
-                if (g_enc && g_enc_mode != 1 && !pend && R.has_rt && tbdr_on() && rt_same(&R.rt, r)) { g_rt_merged = 1; if (!g_rt_merge_n++) MLOG("同目标续用：首例 通道 %llu", g_stat_pass); PD("M %llu 同目标续用通道", g_stat_pass); R.rt = *r; break; }
-                rp_flush(); sub_cut(); R.rt = *r; R.has_rt = 1; break;
+                if (g_enc && g_enc_mode != 1 && !pend && R.has_rt && tbdr_on() && rt_same(&R.rt, r)) { g_rt_merged = 1; g_merge_ok++; if (!g_rt_merge_n++) MLOG("同目标续用：首例 通道 %llu", g_stat_pass); PD("M %llu 同目标续用通道", g_stat_pass); R.rt = *r; break; }
+                {   // Why the same-target continuation was refused (g_enc / g_enc_mode / pending clear / no target / TBDH / not the same attachments)
+                    static int dbg = -1; if (dbg < 0) dbg = getenv("DM_MERGEDBG") != NULL;
+                    if (dbg) { if (!g_enc) g_mr_noenc++; else if (g_enc_mode == 1) g_mr_mode++; else if (pend) g_mr_pend++; else if (!R.has_rt) g_mr_nort++;
+                               else if (!tbdr_on()) g_mr_notbdr++; else if (!rt_same(&R.rt, r)) g_mr_diff++; else g_mr_other++; } }
+                rp_flush(); sub_cut(); g_merge_no++; R.rt = *r; R.has_rt = 1; break;
             }
             case OP_CLEAR_COLOR: {
                 const p_clear_color *c = a;
