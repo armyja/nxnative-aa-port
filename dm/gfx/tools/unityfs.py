@@ -74,10 +74,8 @@ def common_strings(image):
         run = image[p:e]
         if all(0x20 <= ch < 0x7f for ch in run):
             tab[p - a] = run.decode(); p = e + 1
-        else:                                                     # damaged: move to the next printable byte
-            q = p
-            while q < e and not (0x20 <= image[q] < 0x7f): q += 1
-            p = q if q < e else e + 1
+        else:                                                     # damaged entry: skip the whole run (p must advance!)
+            p = e + 1
             damaged += 1
             if strict: break
     if damaged: print(f'[unityfs] common string table: {len(tab)} entries ({damaged} damaged runs skipped)', flush=True)
