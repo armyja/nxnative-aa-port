@@ -1226,7 +1226,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
         }
         g_nup_blits = nb0; g_nup_decs = nd0;   // Roll back the copies / decompressions already recorded for this texture: the already-encoded deswizzle only writes the staging area and is harmless; this texture takes the CPU path below instead
         if (!g_cb) up_flush();
-        RED_ONCE(41, "预排布贴图 GPU 解排布不支持格式 %#x 目标 %d，回退 CPU", t->d.format, t->d.target);
+        RED_ONCE(41, "预排布贴图 GPU 解排布不支持格式 %#x 目标 %d，回退 CPU（ser=%llu %ux%u 级 %u 存储 %llu 标志 %#x 跨距 %u）", t->d.format, t->d.target, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.levels, (unsigned long long)t->L.size, t->d.flags, t->d.stride);
     }
 
     up_begin();
@@ -1239,14 +1239,14 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
         for (unsigned y = 0; y < layers; y++) {
             if (unp) {   // No BC: first deswizzle into a temporary area (compressed blocks), then decompress layer by layer into the staging area
                 uint8_t *cb = malloc(pitch * rows * z); size_t up = (size_t)w * ubpp;
-                if (!cb || nvn_deswizzle(&t->d, l, y, t->mem, cb, pitch)) { free(cb); RED_ONCE(9, "解排布失败 格式 %#x 目标 %d", t->d.format, t->d.target); break; }
+                if (!cb || nvn_deswizzle(&t->d, l, y, t->mem, cb, pitch)) { free(cb); RED_ONCE(9, "解排布失败 格式 %#x 目标 %d（ser=%llu %ux%u 级 %u 存储 %llu 跨距 %u 块高 %d）", t->d.format, t->d.target, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.levels, (unsigned long long)t->L.size, t->d.stride, t->d.pkg_block_h); break; }
                 for (uint32_t zi = 0; zi < z; zi++) nvn_bc_decode(t->d.format, cb + zi * pitch * rows, pitch, w, h, (uint8_t *)stg.contents + off + zi * up * h, up);
                 free(cb);
                 up_blit_add(stg, off, up, up * h, MTLSizeMake(w, h, z), mt, y, l);
                 off += up * h * z;
                 continue;
             }
-            if (nvn_deswizzle(&t->d, l, y, t->mem, (uint8_t *)stg.contents + off, pitch)) { RED_ONCE(9, "解排布失败 格式 %#x 目标 %d", t->d.format, t->d.target); break; }
+            if (nvn_deswizzle(&t->d, l, y, t->mem, (uint8_t *)stg.contents + off, pitch)) { RED_ONCE(9, "解排布失败 格式 %#x 目标 %d（ser=%llu %ux%u 级 %u 存储 %llu 跨距 %u 块高 %d）", t->d.format, t->d.target, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.levels, (unsigned long long)t->L.size, t->d.stride, t->d.pkg_block_h); break; }
             up_blit_add(stg, off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l);
             off += pitch * rows * z;
         }
@@ -1358,13 +1358,15 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     {   // DM_TEX_REFRESH=WxH[:every] diagnostic: forget the cached MTLTexture of every texture of that size every <every> frames (default 1), so the
         // upload path reads the guest storage again. A texture that the engine fills after its first use keeps the stale upload otherwise; this tells
         // whether the guest storage has the right content (only the upload is missing) or is black itself.
-        static int rr = -1; static uint32_t rw = 0, rh = 0; static int every = 1; static uint64_t lastf = ~0ull; static int logged;
+        static int rr = -1; static uint32_t rw = 0, rh = 0; static int every = 1; static uint64_t lastf = ~0ull; static int logged; static int rmin;
         if (rr < 0) { rr = 0; const char *e = getenv("DM_TEX_REFRESH");
-            if (e) { int n = sscanf(e, "%ux%u:%d", &rw, &rh, &every); rr = n >= 2 && rw && rh; if (rr && every < 1) every = 1; } }
-        if (rr && t->d.width == rw && t->d.height == rh && t->d.levels == 1) {
+            if (e && !strncmp(e, "big", 3)) { rmin = atoi(e + 3); if (rmin <= 0) rmin = 1024; every = 0; const char *c = strchr(e, ':'); if (c) every = atoi(c + 1); if (every < 1) every = 1; rr = 1; }
+            else if (e) { int n = sscanf(e, "%ux%u:%d", &rw, &rh, &every); rr = n >= 2 && rw && rh; if (rr && every < 1) every = 1; } }
+        if (rr && t->d.levels == 1 && !(t->d.flags & 8) && (rmin ? (t->d.width >= (uint32_t)rmin && t->d.height >= (uint32_t)rmin)
+                                                          : (t->d.width == rw && t->d.height == rh))) {
             uint64_t f = atomic_load(&g_cur_frame);
             if (lastf == ~0ull || f >= lastf + (uint64_t)every) { lastf = f; serial_del(t->serial);
-                if (!logged++) MLOG("[texredo] 每 %d 帧重传 %ux%u 的贴图（首例 ser=%llu）", every, rw, rh, (unsigned long long)t->serial); }
+                if (!logged++) MLOG("[texredo] 每 %d 帧重传%s（首例 ser=%llu %ux%u）", every, rmin ? "所有大贴图" : "该尺寸贴图", (unsigned long long)t->serial, t->d.width, t->d.height); }
         }
     }
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(70, "贴图对象已失效（magic %#x，首例 ser=%llu）：不建 MTLTexture", t->magic, (unsigned long long)t->serial); return nil; }
@@ -1535,6 +1537,9 @@ static uint64_t g_stat_args_enc, g_stat_args_reuse;   // Argument buffer: new-en
 static uint64_t g_stat_draw, g_stat_pass, g_bw_load, g_bw_store, g_pass_full_rw, g_udc_saved_bytes;   // Bandwidth ledger: attachment load / store bytes, number of full load-store passes
 // DM_NVN_PASSDUMP: records pass attachments / samples / presents one by one (textures by serial) for offline data-flow analysis; the pass numbers of P / D / R / S lines agree (= g_stat_pass after the pass is opened)
 // DM_NVN_PASSDUMP=frame number, or start-end (inclusive at both ends)
+// DM_VBUF_DUMP=<fragment key prefix>:<path>: the vertex stream of the last matching draw, dumped at frame end (before that the submit has not
+// run the GPU-side copies that fill it, which is why DM_NVN_KEYDUMP shows zeros for such buffers)
+static uint64_t g_vd_addr, g_vd_size; static char g_vd_path[512]; static int g_vd_on;
 static int g_kd_force;   // the draw DM_NVN_KEYDUMP matched: force the per-binding records on (see kd_draw)
 static int passdump(void) {
     if (g_kd_force) return 1;
@@ -4974,6 +4979,13 @@ frz_plain:;
                                  t->d.format, t->d.width, t->d.height, (unsigned long long)sz); }
                 pthread_mutex_unlock(&g_rmu);
             } } }
+      {   // DM_VBUF_DUMP=<fragment key prefix>:<path>: remember the vertex stream of the last matching draw, dumped at frame end
+          static int vk = -1; static char key[24];
+          if (vk < 0) { vk = 0; const char *e = getenv("DM_VBUF_DUMP"); const char *c = e ? strchr(e, ':') : NULL;
+              if (c) { size_t n = (size_t)(c - e); if (n > 23) n = 23; memcpy(key, e, n); key[n] = 0; snprintf(g_vd_path, sizeof g_vd_path, "%s", c + 1); vk = 1; } }
+          if (vk && pr->sh[1] && !strncmp(pr->sh[1]->key, key, strlen(key)) && S.vbuf[0].address && S.stream[0].stride)
+              { g_vd_addr = S.vbuf[0].address; g_vd_size = S.vbuf[0].size; g_vd_on = 1; }
+      }
       static const char *dtx; static int dtx_n = -1; if (dtx_n < 0) { dtx = getenv("DM_NVN_DRAWTEX"); dtx_n = dtx && *dtx; }
       if (dtx_n && pr->sh[1] && !strncmp(pr->sh[1]->key, dtx, strlen(dtx))) {
           __unsafe_unretained NvShader *s1 = pr->sh[1];
@@ -6219,6 +6231,16 @@ static void td_dump(void) {
             BOOL seen = NO; for (NSArray *e in g_td_list) if ([e[1] unsignedLongLongValue] == ser) seen = YES;
             if (!seen) [g_td_list addObject:@[t, @(ser), @(0), @(0)]];
         } }
+    if (g_vd_on && g_vd_addr) {   // DM_VBUF_DUMP: dump the remembered vertex buffer now that the submit has filled it
+        void *mb; uint64_t mo; uint64_t sz = g_vd_size > (8u << 20) ? (8u << 20) : g_vd_size;
+        if (sz && mtl_addr(g_vd_addr, sz, &mb, &mo)) {
+            FILE *f = fopen(g_vd_path, "wb");
+            if (f) { fprintf(f, "%llu %llu\n", (unsigned long long)g_vd_addr, (unsigned long long)sz);
+                fwrite((const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo, 1, (size_t)sz, f); fclose(f); }
+            MLOG("[vbuf] 顶点缓冲 %#llx 大小 %llu → %s", (unsigned long long)g_vd_addr, (unsigned long long)sz, g_vd_path);
+        } else MLOG("[vbuf] 顶点缓冲 %#llx 不在内存池", (unsigned long long)g_vd_addr);
+        g_vd_on = 0;
+    }
     // DM_NVN_TEXRAW=index,...: save raw bytes by texture index (including 3D; file: %d in the path is replaced with the index, suffix .raw, first-line text header: width height depth format bytes-per-row)
     for (const char *q = getenv("DM_NVN_TEXRAW"); q && *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) {
         if (!strncmp(q, "info", 4)) {   // DM_NVN_TEXRAW=info: the textures remembered by DM_NVN_TEXINFO
