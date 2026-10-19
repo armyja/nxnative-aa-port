@@ -202,6 +202,7 @@ HLE_FORCE("_ZN2nn4diag6detail7PutImplERKNS0_11LogMetaDataEPKcm", "游戏日志 �
 static void diag_abort(uint32_t res, void *lr) {
     module_t *m = module_of(lr);
     LOG("游戏调用 nn::diag 中止：Result %#x，调用点 %s+%#llx", res, m ? m->name : "?", m ? (unsigned long long)((uint8_t *)lr - m->base) : (unsigned long long)(uintptr_t)lr);
+
     dm_backtrace((uint64_t)__builtin_frame_address(1));
     die("游戏中止");
 }

@@ -456,6 +456,13 @@ def site_pcrel(ins):
     emit(LDP(S, T, 31, -16)); emit(B(here(), ins.address + 4))
     return start
 
+def site_br_ptr(ins):
+    """br x18 where x18 holds a pointer loaded from memory (Unity's virtual dispatch: ldr x18, [x0, #n]; br x18).
+    The value lives in the host slot, so read it and branch. x16 is IP0 (scratch) on both sides of the call."""
+    start = here()
+    emit(STUR(16, 31, -16)); emit(MRS_TPIDRRO(16)); emit_slot_addr(16, 17, 'K18'); emit(LDRX(16, 16)); emit(BR(16))
+    return start
+
 def site_br(ins, base, count):
     """Jump table br x18: target = base + 4i. Stash x16 in the red zone → equally spaced landing pads → restore x16 → original target."""
     start = here()
@@ -648,7 +655,7 @@ import bisect
 def func_of(a):
     i = bisect.bisect_right(starts, a) - 1
     return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END) if i >= 0 else (a, a + 4)
-done = set(); windows = []; jumps = {}; tabjumps = {}
+done = set(); windows = []; jumps = {}; tabjumps = {}; ptrbrs = {}
 def jump_offsets(insl, j):
     """The br x18 is preceded by the offset-table form (Engage main+0x12eec94): cmp w18,#N; b.hi; ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB.
     The index may be another register, and the bounds check may be on a register copied into it: Link's Awakening's GLSLC (subsdk0+0x1be6e8) has
@@ -747,7 +754,7 @@ for fa, fb in funcs:
                     break
             if not (base and width):
                 tgt = jump_offsets(insl, j)
-                assert tgt, f'jump table {ins.address:x}'
+                if not tgt: ptrbrs[ins.address] = True; continue   # ldr x18, [..]; br x18 (Unity virtual dispatch)
                 tabjumps[ins.address] = tgt; continue
             jumps[ins.address] = (base, width)
     # No jump may land in the middle of a window
@@ -768,7 +775,8 @@ for a in sorted(kinds):
     ins = dis(struct.unpack_from('<I', IMG, a)[0], a)
     if k == 'x18':
         m = ins.mnemonic
-        if m == 'br': st = site_br_tab(ins, tabjumps[a]) if a in tabjumps else site_br(ins, *jumps[a]); stat('br')
+        if m == 'br':
+            st = site_br_tab(ins, tabjumps[a]) if a in tabjumps else (site_br_ptr(ins) if a in ptrbrs else site_br(ins, *jumps[a])); stat('br')
         elif m in ('cbz', 'cbnz', 'tbz', 'tbnz'): st = site_cond(ins); stat('cond')
         elif m in ('adr', 'adrp'): st = site_pcrel(ins); stat('pcrel')
         elif m == 'blr': st = site_blr(ins); stat('blr')

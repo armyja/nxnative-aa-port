@@ -1,0 +1,43 @@
+# 临时游戏档案（手工初建）| Provisional game profile (hand-made first cut)
+# Ace Attorney Investigations Collection (逆转检察官 1&2 御剑精选集), Unity / IL2CPP, NVN
+
+# ---- Identity ----
+title_id	010005501E68C000
+program_id	010005501E68C000
+
+# ---- App ----
+name	Ace Attorney Investigations Collection
+ipa	AceAttorneyInvestigationsCollection.ipa
+app_category	public.app-category.games
+pad_layout	full
+
+# ---- Versions ----
+build	v0	1.0.0	main=d323b2484ad188863010dc0759ac2aeb	rtld=ccd8d2e002a068ea0a32370756f3675e	sdk=311deab1f062b504f3d646a49ddcd4e8	subsdk0=2f9e7f4ec017bb00e214af7c2fd70f4b
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets
+
+# ---- Memory ----
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+
+# ---- NVN driver constant segments（先照 AA456 的基址，跑起来再看日志修正）----
+nvn_tex_base	0x168
+nvn_tex_slots	128
+nvn_samp_base	0x568
+nvn_img_base	0x120
+nvn_img_slots	8
+nvn_ssbo_bases	vs=0x110 ps=0x510 cs=0x310
+
+device_api	55.15
+
+# ---- Shader split ----
+# Unity/IL2CPP: shaders are compiled at build time and shipped inside the Addressables bundles, so the ExeFS has no
+# NVN shader sources to split; try the generic scan first (groups sdf=re is RE Engine only, so leave it empty).
+shader_groups	
+shader_note	Ace Attorney Investigations Collection (Unity IL2CPP)
