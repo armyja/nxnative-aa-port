@@ -616,7 +616,10 @@ static void blit_note(void);   // Per-pass dump: a copy / buffer update ended th
 // Buffer operations check conflicts by guest address range (barrier only when reading or writing a range written earlier); texture operations get one whenever the encoder already holds an operation.
 enum { BW_MAX = 64 };
 static uint64_t g_bw_lo[BW_MAX], g_bw_hi[BW_MAX]; static int g_bw_n, g_blit_ops; static uint64_t g_blit_barriers;
-static id<MTL4ComputeCommandEncoder> blit_raw(void) { blit_note(); rp_end(); if (!g_blit) { ser_gate(); g_blit = enc_b_begin(g_cb); [g_blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice]; g_bw_n = 0; g_blit_ops = 0; } return g_blit; }
+static void rp_end(void);
+static int g_rp_why = 7; static uint64_t g_rp_why_n[8];
+static void rp_end_why(int w) { g_rp_why = w; rp_end(); }
+static id<MTL4ComputeCommandEncoder> blit_raw(void) { blit_note(); rp_end_why(2); if (!g_blit) { ser_gate(); g_blit = enc_b_begin(g_cb); [g_blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice]; g_bw_n = 0; g_blit_ops = 0; } return g_blit; }
 static void blit_barrier(void) {
     static int off = -1; if (off < 0) { const char *e = getenv("DM_NVN_BLIT_ORDER"); off = e && !strcmp(e, "0"); if (off) MLOG("DM_NVN_BLIT_ORDER=0：拷贝编码器内不加屏障（诊断，会复现喷泉竖条）"); }
     if (!off) [g_blit barrierAfterEncoderStages:MTLStageAll beforeEncoderStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
@@ -2149,6 +2152,10 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
                             bytes[bi] = 0; nm[bi] = 0; }
                         if (o) MLOG("[rtstats] 至帧 %llu 目标流量前 6：%s ｜ 续用 %llu 次 / 切目标 %llu 次", (unsigned long long)atomic_load(&g_cur_frame), line, (unsigned long long)g_merge_ok, (unsigned long long)g_merge_no);
                         g_merge_ok = g_merge_no = 0;
+                        if (getenv("DM_MERGEDBG")) { MLOG("[mergedbg] 上次关通道原因：rp_flush %llu / blit %llu / 反馈采样 %llu / 深度切开 %llu / 采样附件切开 %llu / 中途清色 %llu / 其它 %llu",
+                            (unsigned long long)g_rp_why_n[1], (unsigned long long)g_rp_why_n[2], (unsigned long long)g_rp_why_n[3], (unsigned long long)g_rp_why_n[4],
+                            (unsigned long long)g_rp_why_n[5], (unsigned long long)g_rp_why_n[6], (unsigned long long)g_rp_why_n[7]);
+                            memset(g_rp_why_n, 0, sizeof g_rp_why_n); }
                         if (getenv("DM_MERGEDBG")) { MLOG("[mergedbg] 拒绝续用原因：未开编码 %llu / 编码模式 %llu / 有挂起清除 %llu / 无目标 %llu / 非 TBDH %llu / 目标不同 %llu / 其它 %llu",
                             (unsigned long long)g_mr_noenc, (unsigned long long)g_mr_mode, (unsigned long long)g_mr_pend, (unsigned long long)g_mr_nort,
                             (unsigned long long)g_mr_notbdr, (unsigned long long)g_mr_diff, (unsigned long long)g_mr_other);
@@ -2231,6 +2238,7 @@ static void rp_flush(void) {
     int pend = R.clear_d || R.clear_s;
     for (int i = 0; i < 8; i++) pend |= R.clear_c[i];
     if (pend && !g_enc && g_cb) rp_begin_ex(1);
+    g_rp_why = 1;   // rp_flush
     rp_end();
 }
 static int scissor_full(const tex_t *t, const view_t *v, int has_v) {
@@ -5001,7 +5009,7 @@ static void fb_prepare(NvProg *pr) {
                 continue; }
             NSUInteger w = MAX(base.width >> lv, 1ul), h = MAX(base.height >> lv, 1ul);
             id<MTLTexture> snap = fb_snap_tex(base.pixelFormat, w, h); if (!snap) continue;
-            if (g_enc) rp_end();
+            if (g_enc) rp_end_why(3);   // feedback sampling of the attachment
             id<MTL4ComputeCommandEncoder> e = blit(); enc_b_copy_texture(e, base, (NSUInteger)sl, (NSUInteger)lv, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), snap, 0, 0, MTLOriginMake(0, 0, 0));
             MTLTextureSwizzleChannels sw = t.swizzle;
             int same = t.pixelFormat == snap.pixelFormat && sw.red == MTLTextureSwizzleRed && sw.green == MTLTextureSwizzleGreen && sw.blue == MTLTextureSwizzleBlue && sw.alpha == MTLTextureSwizzleAlpha;
@@ -5095,10 +5103,10 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     // The continued render pass may have been opened with fewer depth / stencil attachments (open modes 2 / 3 / 4): if the plane this draw needs is not attached, split before it (on reopen, attach per the new lookahead)
     if (g_rt_merged && g_enc_mode != 0 && (((S.ds.dt || S.ds.dw) && !g_pass.hd) || (S.ds.st && !g_pass.hs))) {
         static int once2; if (!once2++) MLOG("同目标续用：续用通道内绘制要的深度 / 模板平面没挂，在此切开（首例 通道 %llu）", g_stat_pass);
-        PD("M %llu 续用通道内绘制要的深度 / 模板平面没挂，在此切开", g_stat_pass); rp_end(); }
+        PD("M %llu 续用通道内绘制要的深度 / 模板平面没挂，在此切开", g_stat_pass); rp_end_why(4); }
     if (g_rt_range_active && (!rt_range_pr_ro(pr) || !S.ds.dt || S.ds.dw || S.ds.st)) rp_end();   // The external write visibility at the original encoder boundary is not removed
     if (g_rt_merged && draw_samples_rt(pr)) { static int once; if (!once++) MLOG("同目标续用：续用通道内绘制要采样附件，在此切开（首例 通道 %llu）", g_stat_pass);
-        PD("M %llu 续用通道内绘制要采样附件，在此切开", g_stat_pass); rp_end(); }
+        PD("M %llu 续用通道内绘制要采样附件，在此切开", g_stat_pass); rp_end_why(5); }
     static id<MTLFunction> fz_fn;   // Specialized fragment function for this draw of the later pass in a merged render pass (nil = use the original version)
     if (g_fz.active && g_enc && g_fz.phase == 2 && !fz_p2_draw(pr, dw, di, g_fz.lmap2, &fz_fn)) {   // Cannot be proven: end the merged render pass (the earlier pass's result is stored as usual) and reopen with the later pass's original targets
         static int once3; if (!once3++) MLOG("可读 tile 通道合并：后一个通道的绘制证不出，退回分开（首例 通道 %llu）", g_stat_pass);
@@ -6154,7 +6162,7 @@ void mtl_exec(const uint8_t *p) {
                 if (g_enc && g_enc_mode != 1 && !pend && R.has_rt && tbdr_on() && rt_same(&R.rt, r)) { g_rt_merged = 1; g_merge_ok++; if (!g_rt_merge_n++) MLOG("同目标续用：首例 通道 %llu", g_stat_pass); PD("M %llu 同目标续用通道", g_stat_pass); R.rt = *r; break; }
                 {   // Why the same-target continuation was refused (g_enc / g_enc_mode / pending clear / no target / TBDH / not the same attachments)
                     static int dbg = -1; if (dbg < 0) dbg = getenv("DM_MERGEDBG") != NULL;
-                    if (dbg) { if (!g_enc) g_mr_noenc++; else if (g_enc_mode == 1) g_mr_mode++; else if (pend) g_mr_pend++; else if (!R.has_rt) g_mr_nort++;
+                    if (dbg) { if (!g_enc) { g_mr_noenc++; if (g_rp_why >= 0 && g_rp_why < 8) g_rp_why_n[g_rp_why]++; } else if (g_enc_mode == 1) g_mr_mode++; else if (pend) g_mr_pend++; else if (!R.has_rt) g_mr_nort++;
                                else if (!tbdr_on()) g_mr_notbdr++; else if (!rt_same(&R.rt, r)) g_mr_diff++; else g_mr_other++; } }
                 rp_flush(); sub_cut(); g_merge_no++; R.rt = *r; R.has_rt = 1; break;
             }
@@ -6178,7 +6186,7 @@ void mtl_exec(const uint8_t *p) {
                 R.clear_c[c->index] = 1; R.cc[c->index] = MTLClearColorMake(c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]);
                 // Mid-pass clear: close the pass and open the next one for the same targets right away, so the clear lands on this target at this point of the
                 // stream (deferring it to "whatever pass opens next" cleared the wrong texture when the next draws had a different render target).
-                if (g_enc) { rp_end(); rp_begin(); }
+                if (g_enc) { rp_end_why(6); rp_begin(); }
                 break;
             }
             case OP_CLEAR_DS: {
