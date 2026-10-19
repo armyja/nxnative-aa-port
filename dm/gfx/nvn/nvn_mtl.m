@@ -310,6 +310,7 @@ void mtl_init(void) {
     g_ev = [g_dev newSharedEvent];
     g_keep = [NSMutableArray array];
     g_nvn_deswz_gpu = nvn_deswz_gpu_init(g_dev) == 0;
+    if (getenv("DM_NVN_DESWZ_CPU") && *getenv("DM_NVN_DESWZ_CPU") && strcmp(getenv("DM_NVN_DESWZ_CPU"), "0")) g_nvn_deswz_gpu = 0;   // diagnostic: force the CPU deswizzler
     dm_res_report_register(mtl_res_counts);
     if (!g_nvn_deswz_gpu) MLOG("【红】显卡解排布初始化失败，预排布贴图回退 CPU");
     MLOG("Metal 设备 %s", g_dev.name.UTF8String);
@@ -899,7 +900,7 @@ static uint64_t full_hash(const uint8_t *m, uint64_t n) { uint64_t h = 146959810
 // BC3 among the game textures was converted to ASTC offline by the Legacy Device Pack (dm/tools/astc_pack.py); what reaches here is the small remainder of BC. The test switch DM_TEST_NO_BC=1 forces this path on any machine
 static int no_bc(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("DM_TEST_NO_BC"); v = (e && *e && strcmp(e, "0")) || DM_GAME_TEX_BC_UNPACK || ![g_dev supportsBCTextureCompression];
+    if (v < 0) { const char *e = getenv("DM_TEST_NO_BC"); v = (e && !strcmp(e, "0")) ? 0 : ((e && *e) || DM_GAME_TEX_BC_UNPACK || ![g_dev supportsBCTextureCompression]);   // explicit DM_TEST_NO_BC=0 forces the raw compressed path even when the profile unpacks
         if (v) MLOG("显卡不支持 BC 压缩格式%s：BC 贴图建成解压格式（BC1–5 在 GPU 上解压，BC6H / BC7 / 3D 在 CPU 上）", e && *e && strcmp(e, "0") ? "（测试开关 DM_TEST_NO_BC）" : ""); }
     return v;
 }
@@ -1192,7 +1193,9 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
     int gdec = unp && t->d.target != 2 && bcd_fmt(t->d.format) && bcd_pso();   // BC1–5 without BC: GPU deswizzle + GPU decompression
     size_t ctotal = 0;   // Staging size of the compressed blocks (with GPU decompression the staging area holds compressed blocks)
     if (gdec) for (unsigned l = 0; l < d.mipmapLevelCount; l++) { uint32_t w = MAX(t->d.width >> l, 1u), h = MAX(t->d.height >> l, 1u); ctotal += (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * layers; }
-    int use_gpu = (!unp || gdec) && g_nvn_deswz_gpu && mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo);
+    int big_cpu = DM_GAME_DESWZ_CPU_MIN > 0 && bpb > 0 && bw > 0 &&
+                  ((int)t->d.width >= DM_GAME_DESWZ_CPU_MIN || (int)t->d.height >= DM_GAME_DESWZ_CPU_MIN);   // GPU deswizzler mis-decodes the huge pages, CPU one is right
+    int use_gpu = (!unp || gdec) && g_nvn_deswz_gpu && !big_cpu && mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo);
     if (g_nvn_deswz_gpu && !use_gpu && !unp) RED_ONCE(40, "预排布贴图存储不在内存池里，回退 CPU");
     if (use_gpu) {
         // The GPU reads the memory pool at execution time, which is closer to a real Switch than a snapshot at CPU upload time; the dirty-page stamp is still taken before encoding, and later writes still trigger a re-upload.

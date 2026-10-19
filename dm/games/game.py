@@ -94,6 +94,7 @@ def header(g):
     sf = g.get('shared_font', 'bfttf')   # what the shared-font address points at (hle_sdk16.c): bfttf = 8-byte header + TTF, ttf = the TTF alone
     if sf not in ('bfttf', 'ttf'): sys.exit(f'{g.id}: shared_font 只能是 bfttf / ttf | shared_font must be bfttf or ttf: {sf}')
     pl = g.get('pad_layout', 'simple')   # the virtual gamepad's first layout (DmGamepad.m; afterwards whatever the player switched to in game is kept): simple = 2D, full = 3D (D-pad, right stick, L3 / R3)
+    dz = g.get('deswz_cpu_min', '0')   # compressed textures with width or height >= this go through the CPU deswizzler (the GPU one mis-decodes AA456's 3144x3144 BC7 pages)
     bu = g.get('tex_bc_unpack', 'off')   # BC textures created in the decompressed format (the raw compressed upload path mis-decodes some large pages on AA456)
     tu = g.get('tex_upload', 'off')   # block-linear textures in CPU-visible physical pools that the game fills itself get a one-shot upload (no packaged data, no CPU-write hook): on / off
     if tu not in ('on', 'off'): sys.exit(f'{g.id}: tex_upload 只能是 on / off | tex_upload must be on or off: {tu}')
@@ -129,6 +130,7 @@ def header(g):
          f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}',
          f'#define DM_GAME_TEX_UPLOAD_ALL {int(tu == "on")}',
          f'#define DM_GAME_TEX_BC_UNPACK {int(bu == "on")}',
+         f'#define DM_GAME_DESWZ_CPU_MIN {int(dz)}',
          f'#define DM_GAME_PAD_FULL {int(pl == "full")}',
          f'#define DM_GAME_FEEDBACK_SNAP {q(" ".join(fbs))}',
          f'#define DM_GAME_ALPHA_FROM_RED {q(" ".join(afr))}',
