@@ -11,7 +11,7 @@
 #define LOG(...) do { fprintf(stderr, "[dm] " __VA_ARGS__); fputc('\n', stderr); } while (0)
 // DM_DIE_EXIT=1: exit instead of aborting, so atexit handlers still run (the DM_HLECOUNT histogram and other on-exit
 // reports are written when the guest calls nn::diag::Abort). Used while bringing a new game up.
-#define die(...) do { LOG("FATAL " __VA_ARGS__); if (getenv("DM_DIE_EXIT")) exit(3); abort(); } while (0)
+#define die(...) do { LOG("FATAL " __VA_ARGS__); if (getenv("DM_DIE_EXIT")) { void svc_thread_dump(void); svc_thread_dump(); exit(3); } abort(); } while (0)
 
 typedef struct { uint32_t st_name; uint8_t st_info, st_other; uint16_t st_shndx; uint64_t st_value, st_size; } Elf64_Sym;
 typedef struct { int64_t d_tag; union { uint64_t d_val, d_ptr; } d_un; } Elf64_Dyn;

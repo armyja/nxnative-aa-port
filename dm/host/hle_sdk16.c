@@ -1,6 +1,7 @@
 // System service interfaces used by games on newer SDKs (16.x) that the d2r-mobile title did not use: oe / time / pl (shared font) / vi vsync / diag.
 // On the real device all of these go through Horizon system services (IPC); the host gives values directly or makes them "unavailable".
 #include "hle.h"
+#include <mach/mach.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -201,7 +202,37 @@ HLE_FORCE("_ZN2nn4diag6detail7PutImplERKNS0_11LogMetaDataEPKcm", "游戏日志 �
 // Abort: report the call site (module + offset) and the guest backtrace, then exit
 static void diag_abort(uint32_t res, void *lr) {
     module_t *m = module_of(lr);
+    if (getenv("DM_DIE_EXIT")) usleep(300000);   // let the DM_HLELOG reader thread print what led here
     LOG("游戏调用 nn::diag 中止：Result %#x，调用点 %s+%#llx", res, m ? m->name : "?", m ? (unsigned long long)((uint8_t *)lr - m->base) : (unsigned long long)(uintptr_t)lr);
+    {   // Scan the guest stack above our frame for return addresses: shows who called the fatal-error reporter.
+        uint64_t fp0 = (uint64_t)__builtin_frame_address(0); char line[900]; int q = 0;
+        for (int i = 2; i < 96; i++) {
+            uint64_t v = 0; vm_size_t got = 0;
+            if (vm_read_overwrite(mach_task_self(), (vm_address_t)(fp0 + i * 8), sizeof v, (vm_address_t)&v, &got) || got != sizeof v) break;
+            module_t *cm = module_of((void *)v);
+            if (!cm) continue;
+            q += snprintf(line + q, sizeof line - q, " %s+%#llx", cm->name, (unsigned long long)(v - (uint64_t)cm->base));
+            if (q > (int)sizeof line - 40) break;
+        }
+        LOG("中止时栈上的返回地址：%s", line); }
+    {   // The fatal-error reporter formats its message into a global buffer; dump it (main+0x5a53558 in this build).
+        uint8_t *base = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) base = g_mod[i].base;
+        if (base) { const char *msg = (const char *)(base + 0x5a53558); size_t n = strnlen(msg, 200);
+            if (n > 3 && n < 200) { char b[256]; size_t k = 0; for (size_t i = 0; i < n && k < sizeof b - 4; i++) { unsigned char c = (unsigned char)msg[i]; b[k++] = (c >= 32 && c < 127) ? (char)c : '.'; } b[k] = 0;
+                LOG("中止消息缓冲区：%s", b); } }
+    }
+    {   // Walk the guest's frame chain: our own prologue has already saved the guest's x29 at [fp], so this recovers the
+        // caller of the fatal-error reporter (the backtrace printed by the unwinder stops at the reporter because its
+        // frame is the last one it can parse).
+        uint64_t fp = *(uint64_t *)__builtin_frame_address(0); char line[512]; int q = 0;
+        for (int d = 0; d < 10 && fp > 0x100000000ull; d++) {
+            uint64_t pair[2]; vm_size_t got = 0;
+            if (vm_read_overwrite(mach_task_self(), (vm_address_t)fp, sizeof pair, (vm_address_t)pair, &got) || got != sizeof pair) break;
+            module_t *cm = module_of((void *)pair[1]);
+            q += snprintf(line + q, sizeof line - q, " %s+%#llx", cm ? cm->name : "?", cm ? (unsigned long long)(pair[1] - (uint64_t)cm->base) : (unsigned long long)pair[1]);
+            if (pair[0] <= fp || q > (int)sizeof line - 40) break; fp = pair[0];
+        }
+        LOG("中止调用链（宿主帧走查）：%s", line); }
 
     dm_backtrace((uint64_t)__builtin_frame_address(1));
     die("游戏中止");

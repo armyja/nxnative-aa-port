@@ -2,9 +2,12 @@
 # Unity asset bundle reader (enough for shaders): UnityFS bundle → serialized files → objects decoded by their type trees → each platform's subprograms of a Shader.
 #   · UnityFS ('UnityFS\0', format 6..8): big-endian header + block info (LZMA / LZ4 / LZ4HC or stored) + data blocks; the block info lists the file nodes (offset, size, path).
 #   · Serialized file (format 17..22): metadata (type table with type trees, object table) + object data. A type tree string offset with the high bit set refers to Unity's built-in common string table,
-#     which is not shipped with the assets; it is taken from the game's own main ('AABB\0AnimationClip\0…', see common_strings).
-#   · Shader (class 48): the compressedBlob of platform platforms[i] is LZ4-compressed in segments offsets[i][s] / compressedLengths[i][s] / decompressedLengths[i][s];
-#     inside a decompressed segment: u32 subprogram count, then 12-byte entries {offset, length, segment} (2019.3 and later); a subprogram = version, program type, stats, keywords, program code bytes, ...
+#     which is not shipped with the assets; it is taken from the game's own main ('AABB\0AnimationClip\0…', see common_strings). A type tree node is 32 bytes from format 19 (Unity 2019.1, the trailing
+#     refTypeHash u64) and 24 bytes before it (format 17: Unity 5.5 to 2018.4).
+#   · Shader (class 48): the compressedBlob of platform platforms[i] is LZ4-compressed in segments offsets[i][s] / compressedLengths[i][s] / decompressedLengths[i][s] (2019.3 and later);
+#     inside a decompressed segment: u32 subprogram count, then 12-byte entries {offset, length, segment}. Before 2019.3 each platform has one segment (offsets[i] is a number) and the entries are
+#     8 bytes {offset, length}. A subprogram = version, program type, stats, keywords, program code bytes, ...
+#   The pre-2019.3 layouts were found by armyja on Cuphead (Unity 2017.4.9f1, serialized format 17), GitHub pull request #2
 # Only depends on lz4 (the same package shader_split uses for NSOs)
 import lzma, struct
 
@@ -22,14 +25,14 @@ def _decomp(raw, size, kind):
         f = lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[{'id': lzma.FILTER_LZMA1, 'dict_size': dict_size, 'lc': lc, 'lp': lp, 'pb': pb}])
         return f.decompress(raw[5:], size)[:size]
     if kind in (2, 3): return _lz4(raw, size)
-    raise ValueError(f'UnityFS 未知压缩 {kind}')
+    raise ValueError(f'UnityFS: unknown compression {kind}')
 
 def _cstr(d, p):
     e = d.index(b'\0', p); return d[p:e].decode('utf-8', 'replace'), e + 1
 
 def bundle_files(d):
     """UnityFS bundle → [(path, bytes)]"""
-    if d[:8] != b'UnityFS\0': raise ValueError('不是 UnityFS')
+    if d[:8] != b'UnityFS\0': raise ValueError('not UnityFS')
     fmt = struct.unpack_from('>I', d, 8)[0]
     _, p = _cstr(d, 12); _, p = _cstr(d, p)
     size, csz, usz, flags = struct.unpack_from('>qIII', d, p); p += 20
@@ -53,16 +56,31 @@ def bundle_files(d):
     return [(name, bytes(out[off:off + sz])) for off, sz, name in nodes]
 
 def common_strings(image):
-    """Unity's common string table in the game's main → {offset: string}"""
+    """Unity's common string table in the game's main → {offset: string}
+
+    Newer players (Unity 2022, e.g. Ace Attorney Investigations Collection) keep the table in place but some entries
+    are patched over, so the exact 'AABB\\0AnimationClip\\0AnimationCurve\\0' prefix no longer matches and the plain
+    NUL-separated walk stops at the first byte that is not printable. Accept the shorter prefix and skip corrupted
+    runs: the table is a byte buffer addressed by offset, so an entry whose text is damaged only loses its name."""
     a = image.find(b'AABB\0AnimationClip\0AnimationCurve\0')
-    if a < 0: raise ValueError('main 里找不到 Unity 公共字符串表（AABB\\0AnimationClip…）')
-    tab, p = {}, a
-    while True:
-        e = image.index(b'\0', p)
-        if e == p: break
+    strict = a >= 0
+    if a < 0: a = image.find(b'AABB\0AnimationClip')
+    if a < 0: raise ValueError('no Unity common string table in main (AABB\\0AnimationClip...)')
+    tab, p, skipped = {}, a, 0
+    while p < len(image) - 4 and len(tab) < 8192:
+        e = image.find(b'\0', p)
+        if e < 0: break
         s = image[p:e]
-        if not all(0x20 <= ch < 0x7f for ch in s): break
-        tab[p - a] = s.decode(); p = e + 1
+        if s and all(0x20 <= ch < 0x7f for ch in s):
+            tab[p - a] = s.decode(); p = e + 1
+        elif strict:
+            break
+        else:   # damaged entry: move to the next printable run inside it, else past the NUL
+            q = p
+            while q < e and not (0x20 <= image[q] < 0x7f): q += 1
+            p = q if q < e else e + 1
+            skipped += 1
+    if skipped: print(f'[unityfs] common string table: {len(tab)} entries, {skipped} damaged runs skipped', flush=True)
     return tab
 
 class Node:
@@ -108,7 +126,7 @@ def serialized_objects(d, common, want=None, trees=None):
     """serialized file → yields (class ID, path ID, object dict); want = only decode these class IDs.
     trees = {(class ID, type hash): type tree}: files with type trees record theirs, files without (the game's own data.unity3d and so on) borrow one of the same class and hash -- the same hash means the same layout"""
     msz, fsz, ver, doff = struct.unpack_from('>IIII', d, 0)
-    if not 19 <= ver <= 22: raise ValueError(f'序列化文件格式 {ver} 未支持')
+    if not 17 <= ver <= 22: raise ValueError(f'serialized file format {ver} is not supported')
     p = 16; le = d[p] == 0; p += 4
     if ver >= 22: msz, fsz, doff, _ = struct.unpack_from('>Iqqq', d, p); p += 28
     r = Reader(d, le); r.p = p
@@ -120,13 +138,13 @@ def serialized_objects(d, common, want=None, trees=None):
         h = d[r.p:r.p + 16]; r.p += 16
         root = None
         if tt:
-            nn, sb = r.u('i'), r.u('i'); raw = [r.u('HBBIIiiiQ') for _ in range(nn)]
+            nn, sb = r.u('i'), r.u('i'); raw = [r.u('HBBIIiiiQ' if ver >= 19 else 'HBBIIiii') for _ in range(nn)]   # refTypeHash from format 19
             buf = d[r.p:r.p + sb]; r.p += sb
             def st(o):
                 if o & 0x80000000: return common.get(o & 0x7fffffff, f'?{o & 0x7fffffff}')
                 return buf[o:buf.index(b'\0', o)].decode('utf-8', 'replace')
             stack = []
-            for _v, lv, _tf, to, no, bs, _ix, mf, _h in raw:
+            for _v, lv, _tf, to, no, bs, _ix, mf, *_ in raw:
                 nd = Node(st(to), st(no), bs, mf)
                 del stack[lv:]
                 if stack: stack[-1].kids.append(nd)
@@ -143,15 +161,15 @@ def serialized_objects(d, common, want=None, trees=None):
     for pid, start, size, ti in objs:
         cid, h, root = tlist[ti]
         if want and cid not in want: continue
-        if root is None: raise NoTree(f'类 {cid}（类型哈希 {h.hex()}）没有类型树可用')
+        if root is None: raise NoTree(f'class {cid} (type hash {h.hex()}) has no type tree available')
         o = Reader(d, le); o.d = d[doff + start:doff + start + size]
         yield cid, pid, _read(o, root)
 
 def is_serialized(d):
-    """does it look like a serialized file (big-endian header: format 19..22; from 22 the sizes follow +0x14)"""
+    """does it look like a serialized file (big-endian header: format 17..22; from 22 the sizes follow +0x14)"""
     if len(d) < 48: return False
     ver = struct.unpack_from('>I', d, 8)[0]
-    if not 19 <= ver <= 22 or d[16] not in (0, 1): return False
+    if not 17 <= ver <= 22 or d[16] not in (0, 1): return False
     if ver >= 22: msz, fsz, doff = struct.unpack_from('>Iqq', d, 20)
     else: msz, fsz, _, doff = struct.unpack_from('>IIII', d, 0)
     return fsz == len(d) and 0 < msz < fsz and doff <= fsz
@@ -161,7 +179,12 @@ def shader_programs(sh):
     blob = sh['compressedBlob']
     for i, plat in enumerate(sh['platforms']):
         offs, clen, dlen = sh['offsets'][i], sh['compressedLengths'][i], sh['decompressedLengths'][i]
-        if not isinstance(offs, list): offs, clen, dlen = [offs], [clen], [dlen]   # before 2019.3: one segment per platform
+        if not isinstance(offs, list):   # before 2019.3: one segment per platform, 8-byte entries {offset, length}
+            s0 = _lz4(blob[offs:offs + clen], dlen); n = struct.unpack_from('<I', s0, 0)[0]
+            for k in range(n):
+                off, ln = struct.unpack_from('<II', s0, 4 + 8 * k)
+                yield plat, k, s0[off:off + ln]
+            continue
         segs = [_lz4(blob[o:o + c], u) for o, c, u in zip(offs, clen, dlen)]
         if not segs: continue
         s0 = segs[0]; n = struct.unpack_from('<I', s0, 0)[0]

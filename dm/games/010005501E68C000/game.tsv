@@ -19,12 +19,16 @@ shader_versions	v0
 # ---- Files ----
 modules	main subsdk0 sdk
 romfs_marker	Data/StreamingAssets
+zip_store	.bundle:.assets:.unity3d
 
 # ---- Memory ----
-mem_reserve	0x100000000
-mem_alias	0x10000000
+# Unity (IL2CPP): the NPDM declares system resource, so nninitStartup hands the application pool to StandardAllocator
+# as virtual address memory. Values follow the Unity profile of this repository (Fire Emblem Engage), which measured
+# 1.55 GB in use with a 2.5 GB pool: 5 GB block = 256 MB front + 4.375 GB alias + 256 MB stack + 128 MB heap.
+mem_reserve	0x140000000
+mem_alias	0x118000000
 mem_stack	0x10000000
-app_pool	0xCD500000
+app_pool	0xA0000000
 
 # ---- NVN driver constant segments（先照 AA456 的基址，跑起来再看日志修正）----
 nvn_tex_base	0x168
@@ -37,7 +41,7 @@ nvn_ssbo_bases	vs=0x110 ps=0x510 cs=0x310
 device_api	55.15
 
 # ---- Shader split ----
-# Unity/IL2CPP: shaders are compiled at build time and shipped inside the Addressables bundles, so the ExeFS has no
-# NVN shader sources to split; try the generic scan first (groups sdf=re is RE Engine only, so leave it empty).
-shader_groups	
+# Unity/IL2CPP: shaders are compiled at build time and shipped as Shader objects inside UnityFS bundles; shader_split.py
+# reads them through unityfs.py. Built-ins (Resources/, globalgamemanagers) go to engine, the Addressables bundles to assets.
+shader_groups	/Resources/=engine /globalgamemanagers=engine /StreamingAssets/=assets
 shader_note	Ace Attorney Investigations Collection (Unity IL2CPP)
