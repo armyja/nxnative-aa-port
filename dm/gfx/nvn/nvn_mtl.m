@@ -6103,7 +6103,10 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
         if (tmp) { for (size_t y = 0; y < h / 2; y++) { memcpy(tmp, p + y * row, row); memcpy(p + y * row, p + (h - 1 - y) * row, row); memcpy(p + (h - 1 - y) * row, tmp, row); } free(tmp); } }
     int bgra = read.pixelFormat == MTLPixelFormatBGRA8Unorm || read.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB;
     CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    // Texture dumps keep the alpha channel: whether a region of a layer is transparent or opaque black is invisible in an RGB-only image
+    // (the AA456 black rectangle in the 1920x1200 character layer), and the window screenshot never has a meaningful alpha to preserve.
     CGBitmapInfo bi = bgra ? (kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little) : (CGBitmapInfo)kCGImageAlphaNoneSkipLast;
+    if (!screen) bi = bgra ? (kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little) : (CGBitmapInfo)kCGImageAlphaPremultipliedLast;
     CGContextRef ctx = CGBitmapContextCreate(buf.contents, w, h, 8, row, cs, bi);
     CGImageRef img = ctx ? CGBitmapContextCreateImage(ctx) : NULL;
     CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
@@ -6165,6 +6168,42 @@ static void td_dump(void) {
         if (!ps) { MLOG("【红】TEXDUMP 管线失败 %s", e.localizedDescription.UTF8String); return; }
     }
     MLOG("[texdump] 帧 %ld 共 %lu 张颜色目标", g_td_frame, (unsigned long)g_td_list.count);
+    {   // DM_TEXDUMP_EXTRA=serial[,serial...] or big<size>: also save these *sampled* textures (not render targets) at the same frame, through the same
+        // sample-to-RGBA8 path (a black region of an atlas is otherwise only visible as black pixels in the picture it is drawn into).
+        // big1024 = every registered texture at least 1024x1024 (the big atlases get different serials in different runs, so a serial list does not carry over)
+        const char *q = getenv("DM_TEXDUMP_EXTRA");
+        for (; q && *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) {
+            if (!strncmp(q, "big", 3)) {
+                int min = atoi(q + 3); if (min <= 0) min = 1024;
+                uint64_t ser[24]; uint32_t fmt[24], ww[24], hh[24]; int n = 0;
+                pthread_mutex_lock(&g_rmu);
+                for (int i = 0; i < g_ntreg && n < 24; i++) {
+                    const tex_t *t = &g_treg[i].t;
+                    if (!g_treg[i].ok || !t->serial || t->d.width < (uint32_t)min || t->d.height < (uint32_t)min || (t->d.flags & 8)) continue;
+                    ser[n] = t->serial; fmt[n] = t->d.format; ww[n] = t->d.width; hh[n] = t->d.height; n++;
+                }
+                pthread_mutex_unlock(&g_rmu);
+                for (int i = 0; i < n; i++) {
+                    id o = serial_get(ser[i]); id<MTLTexture> m = [o isKindOfClass:[NvPkg class]] ? ((NvPkg *)o)->tex : o;
+                    if (!m) {   // Not in the serial cache (packaged / view-resolved textures): resolve it the way the replay does
+                        pthread_mutex_lock(&g_rmu);
+                        for (int k = 0; k < g_ntreg && !m; k++)
+                            if (g_treg[k].ok && g_treg[k].t.serial == ser[i] && g_treg[k].t.d.width == ww[i] && g_treg[k].t.d.height == hh[i]) {
+                                tex_t cp = g_treg[k].t; pthread_mutex_unlock(&g_rmu); m = tex_mtl(&cp); pthread_mutex_lock(&g_rmu); }
+                        pthread_mutex_unlock(&g_rmu);
+                    }
+                    BOOL seen = NO; for (NSArray *e in g_td_list) if ([e[1] unsignedLongLongValue] == ser[i]) seen = YES;
+                    if (m && !seen) [g_td_list addObject:@[m, @(ser[i]), @(0), @(0)]];
+                    MLOG("[texdump] 额外大贴图 ser=%llu NVN 格式 %#x %ux%u MTL 格式 %lu 入列=%d", (unsigned long long)ser[i], fmt[i], ww[i], hh[i], (unsigned long)m.pixelFormat, (int)(m && !seen));
+                }
+                continue;
+            }
+            uint64_t ser = (uint64_t)atoll(q); id o = serial_get(ser);
+            id<MTLTexture> t = [o isKindOfClass:[NvPkg class]] ? ((NvPkg *)o)->tex : o;
+            if (!t) { MLOG("[texdump] 额外 ser=%llu 不在序号表", ser); continue; }
+            BOOL seen = NO; for (NSArray *e in g_td_list) if ([e[1] unsignedLongLongValue] == ser) seen = YES;
+            if (!seen) [g_td_list addObject:@[t, @(ser), @(0), @(0)]];
+        } }
     // DM_NVN_TEXRAW=index,...: save raw bytes by texture index (including 3D; file: %d in the path is replaced with the index, suffix .raw, first-line text header: width height depth format bytes-per-row)
     for (const char *q = getenv("DM_NVN_TEXRAW"); q && *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) {
         if (!strncmp(q, "info", 4)) {   // DM_NVN_TEXRAW=info: the textures remembered by DM_NVN_TEXINFO
@@ -6241,7 +6280,7 @@ void ts_after(void) {
         id<MTLTexture> c = [g_dev newTextureWithDescriptor:d];
         id<MTLBlitCommandEncoder> b = [dcb blitCommandEncoder];
         [b copyFromTexture:t sourceSlice:0 sourceLevel:g_ts_lv[i] toTexture:c destinationSlice:0 destinationLevel:g_ts_lv[i] sliceCount:1 levelCount:1]; [b endEncoding];
-        [g_td_list addObject:@[c, @((uint64_t)(g_ts_on - 1) * 1000 + g_ts_ser[i]), @(g_ts_lv[i])]];
+        [g_td_list addObject:@[c, @((uint64_t)(g_ts_on - 1) * 1000 + g_ts_ser[i]), @(g_ts_lv[i]), @(0)]];   // four elements like the render-target entries (the saver reads e[3] as the slice)
     }
     g_ts_on = 0;
     [dcb commit];
