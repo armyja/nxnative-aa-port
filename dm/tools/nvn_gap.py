@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""NVN gap report: which host entry points the game calls but the host does not implement.
+"""Two reports from one game run:
 
-Inputs
-  --list  FILE  DM_NVN_GAPLIST output: "name<TAB>class" (impl / noop / stub)
-  --calls FILE  optional DM_NVN_TSV output: "frame<TAB>name<TAB>count" rows; only known NVN names are used
-  --imports FILE optional plain list of symbol names the game imports (e.g. from the NSO dynsym)
+1) NVN gap list - which host entry points the game calls but the host treats as a no-op or a stub.
+   Inputs: DM_NVN_GAPLIST=<file> (entry classification) and optionally DM_NVN_TSV=<file> (per-frame call table).
+2) Red-line summary - every 【红】 line the host printed during the run, deduplicated by shape with counts,
+   so "implemented but wrong" behaviour is visible in one place instead of scrolling the log.
+   Input: the run log (-–log).
 
-Output: stubs / no-ops that were actually called (sorted by call count), then uncalled stubs, then a summary.
-The point: fix what the game exercises first, but keep the full list so nothing is discovered only by crashing.
+Both sections are optional; give at least one input.
+Usage:
+  dm/tools/nvn_gap.py --list gap.tsv --calls calls.tsv --log run.log
 """
-import argparse, collections, sys
+import argparse, collections, re, sys
 
 def load_list(path):
     cls = {}
@@ -30,45 +32,59 @@ def load_calls(path):
                 except ValueError: pass
     return calls
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--list', required=True)
-    ap.add_argument('--calls')
-    ap.add_argument('--imports')
-    a = ap.parse_args()
+HEX = re.compile(r'0x[0-9a-fA-F]+')
+NUM = re.compile(r'\b\d+\b')
+def shape(line):
+    """Normalise a red line so repeats of the same message group together."""
+    s = line.strip()
+    s = HEX.sub('0x…', s)
+    s = NUM.sub('#', s)
+    s = re.sub(r'\s+', ' ', s)
+    return s
+
+def red_summary(path):
+    counts = collections.Counter(); first = {}; total = 0
+    with open(path, encoding='utf-8', errors='replace') as f:
+        for ln, line in enumerate(f, 1):
+            if '【红】' not in line: continue
+            total += 1
+            k = shape(line)
+            counts[k] += 1
+            first.setdefault(k, ln)
+    return counts, first, total
+
+def gap_section(a):
     cls = load_list(a.list)
     calls = load_calls(a.calls) if a.calls else collections.Counter()
-    imports = set()
-    if a.imports:
-        with open(a.imports, encoding='utf-8', errors='replace') as f:
-            imports = {l.strip() for l in f if l.strip()}
-
-    total = len(cls)
     n_impl = sum(1 for v in cls.values() if v == 'impl')
     n_noop = sum(1 for v in cls.values() if v == 'noop')
     n_stub = sum(1 for v in cls.values() if v == 'stub')
-    print(f'NVN 入口 {total}：已实现 {n_impl}，空实现 {n_noop}，报红桩 {n_stub}')
-    if imports:
-        hit = [n for n in imports if n in cls]
-        print(f'游戏导入 {len(imports)} 个符号，其中 {len(hit)} 个是 NVN 入口')
-
-    called_bad = [(calls[n], n, cls[n]) for n in cls if cls[n] in ('stub', 'noop') and calls.get(n)]
-    called_bad.sort(reverse=True)
+    print('=== 缺口清单（NVN 入口）===')
+    print(f'入口 {len(cls)}：已实现 {n_impl}，空实现 {n_noop}，报红桩 {n_stub}')
     if a.calls:
+        bad = [(calls[n], n, cls[n]) for n in cls if cls[n] in ('stub', 'noop') and calls.get(n)]
+        bad.sort(reverse=True)
         n_called = sum(1 for n in cls if calls.get(n))
-        print(f'本次运行实际调用 {n_called} 个入口；其中桩/空实现 {len(called_bad)} 个：')
-        for c, n, k in called_bad:
-            src = '（游戏导入）' if not imports or n in imports else ''
-            print(f'  {c:>9}  {k:<4} {n}{src}')
-        if not called_bad:
-            print('  （无：调用的入口都有实现）')
+        print(f'本次实际调用 {n_called} 个入口；其中桩/空实现 {len(bad)} 个：')
+        for c, n, k in bad: print(f'  {c:>9}  {k:<4} {n}')
+        if not bad: print('  （无：调用的入口都有实现）')
+        uncalled = sorted(n for n in cls if cls[n] == 'stub' and not calls.get(n))
+        print(f'未被调用过的桩 {len(uncalled)} 个（后续低频候选，暂不用补）')
 
-    uncalled_stub = sorted(n for n in cls if cls[n] == 'stub' and not calls.get(n))
-    if imports:
-        imp_stub = [n for n in uncalled_stub if n in imports]
-        print(f'\n未被调用但游戏导入了的桩（{len(imp_stub)}）：')
-        for n in imp_stub: print('  ' + n)
-    print(f'\n未被调用过的桩共 {len(uncalled_stub)} 个（可作为后续优先级较低的候选）')
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--list'); ap.add_argument('--calls'); ap.add_argument('--log')
+    a = ap.parse_args()
+    if not (a.list or a.log):
+        ap.error('至少给 --list（缺口清单）或 --log（红色告警汇总）之一')
+    if a.list: gap_section(a)
+    if a.log:
+        counts, first, total = red_summary(a.log)
+        print('\n=== 红色告警汇总（本次运行）===')
+        print(f'{len(counts)} 类 / {total} 条')
+        if not counts: print('  （没有红色告警）')
+        for k, c in sorted(counts.items(), key=lambda kv: (-kv[1], first[kv[0]])):
+            print(f'  {c:>6} 次  行{first[k]:<6}  {k[:160]}')
     return 0
 
 if __name__ == '__main__':
