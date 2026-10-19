@@ -5905,12 +5905,20 @@ void mtl_exec(const uint8_t *p) {
                     && !scissor_full(R.rt.color[c->index], &R.rt.cview[c->index], R.rt.has_cview[c->index]) && clear_rect_zero(c->index)) break;
                 if (g_rt_merged) rp_end();   // A clear arrived in a continued render pass: end it here, and the clear is attached to the start of the next render pass as usual
                 if (c->index < 0 || c->index >= R.rt.n || !R.rt.color[c->index]) { RED_ONCE(5, "清色目标 %d 无效", c->index); break; }
-                if (g_enc || c->mask != 0xf || !scissor_full(R.rt.color[c->index], &R.rt.cview[c->index], R.rt.has_cview[c->index])) {
-                    RED_ONCE(6, "通道中途 / 部分掩码 / 部分剪裁的清色未实现（首例 掩码 %#x）", c->mask);
-                    static uint64_t n; if (getenv("DM_NVN_CLEARLOG") && n++ < 40) MLOG("清色跳过 帧%llu 通道%llu 目标%d ser=%llu %ux%u 中途=%d 掩码=%#x 剪裁=%d,%d,%d,%d 色=%g,%g,%g,%g", (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, c->index,
-                        (unsigned long long)R.rt.color[c->index]->serial, R.rt.color[c->index]->d.width, R.rt.color[c->index]->d.height, g_enc != nil, c->mask, R.sc.x, R.sc.y, R.sc.w, R.sc.h, c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]);
+                if (c->mask != 0xf) {   // partial channel mask: Metal's load-action clear always writes all four channels
+                    RED_ONCE(6, "部分掩码的清色未实现（首例 掩码 %#x）", c->mask);
+                    static uint64_t n; if (getenv("DM_NVN_CLEARLOG") && n++ < 40) MLOG("清色跳过（掩码） 帧%llu 通道%llu 目标%d ser=%llu %ux%u 掩码=%#x 剪裁=%d,%d,%d,%d 色=%g,%g,%g,%g", (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, c->index,
+                        (unsigned long long)R.rt.color[c->index]->serial, R.rt.color[c->index]->d.width, R.rt.color[c->index]->d.height, c->mask, R.sc.x, R.sc.y, R.sc.w, R.sc.h, c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]);
                     break; }
+                // Scissored clear (AA456 clears a 1920x1088 target with a 1920x1080 rect): Metal's load-action clear covers the whole level, which here only adds the
+                // 8 rows of alignment padding the game never samples, so clear the whole target. Rect-exact zero clears are handled above by the blit.
+                if (!scissor_full(R.rt.color[c->index], &R.rt.cview[c->index], R.rt.has_cview[c->index])) {
+                    static int once; if (!once++) MLOG("剪裁清色：按整目标清（多出的行是对齐填充，游戏不采样）");
+                }
                 R.clear_c[c->index] = 1; R.cc[c->index] = MTLClearColorMake(c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]);
+                // Mid-pass clear: close the pass and open the next one for the same targets right away, so the clear lands on this target at this point of the
+                // stream (deferring it to "whatever pass opens next" cleared the wrong texture when the next draws had a different render target).
+                if (g_enc) { rp_end(); rp_begin(); }
                 break;
             }
             case OP_CLEAR_DS: {
