@@ -64,13 +64,19 @@ Nothing in `patched_*` is ever written back to `extract/`; the rewriter only rea
 
 ## Building and running (Ace Attorney 123)
 
+Everything below runs **from the repository root** (the directory that contains `dm/` and `scripts/`);
+`make -C dm/host`, `dm/tools/patch_nso.py` and `dm/host/dmhost` are all relative to it.
+`python3` must have `lz4`, `capstone` and `fonttools` installed (`python3 -m pip install lz4 capstone fonttools`,
+or use a virtualenv's interpreter in place of `python3`).
+
 ```bash
-B=~/projects/aa123/0100CB000A142000_build      # <- the folder described above
+cd ~/projects/nxnative                         # <- repository root
+B=~/projects/aa123/0100CB000A142000_build      # <- the build folder described above
 
 make -C dm/host GAME=0100CB000A142000 dmhost
 
 # rewrite the modules (patches only; never touches the original files)
-~/projects/nxnative-venv/bin/python dm/tools/patch_nso.py \
+python3 dm/tools/patch_nso.py \
   "$B/extract/v196608/ExeFS/main" "$B/patched_v196608" main
 
 DM_WINDOW=1 DM_AUDIO=1 DM_KEEP_FOCUS=1 DM_NVN_CBDEFER=1 \
@@ -83,12 +89,13 @@ DM_SAVE="$B/run/save" DM_TEMP="$B/run/temp" DM_FONT_DIR="$B/font" \
 ## Running Ace Attorney 456
 
 ```bash
-B=~/projects/aa456/010020D01B890000_build      # <- the folder described above
+cd ~/projects/nxnative                         # <- repository root
+B=~/projects/aa456/010020D01B890000_build      # <- the build folder described above
 ROMFS=/Volumes/Untitled/aa456/build/RomFS      # wherever the 456 RomFS was extracted
 
 make -C dm/host GAME=010020D01B890000 dmhost
 
-~/projects/nxnative-venv/bin/python dm/tools/patch_nso.py \
+python3 dm/tools/patch_nso.py \
   "$B/extract/v65536/ExeFS/main" "$B/patched_v65536" main
 
 DM_WINDOW=1 DM_AUDIO=1 \

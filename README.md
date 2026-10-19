@@ -70,6 +70,7 @@ dm/host/dmhost "$B/patched_v196608"
 ```
 
 ```bash
+cd ~/projects/nxnative                       # repository root
 B=~/projects/aa456/010020D01B890000_build
 ROMFS=/Volumes/Untitled/aa456/build/RomFS     # wherever the 456 RomFS lives
 make -C dm/host GAME=010020D01B890000 dmhost
@@ -216,6 +217,7 @@ dm/host/dmhost "$B/patched_v196608"
 ```
 
 ```bash
+cd ~/projects/nxnative                       # 仓库根目录
 B=~/projects/aa456/010020D01B890000_build
 ROMFS=/Volumes/Untitled/aa456/build/RomFS     # 456 的 RomFS 解包位置
 make -C dm/host GAME=010020D01B890000 dmhost
