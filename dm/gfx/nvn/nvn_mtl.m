@@ -1540,7 +1540,9 @@ static uint64_t g_stat_draw, g_stat_pass, g_bw_load, g_bw_store, g_pass_full_rw,
 // DM_VBUF_DUMP=<fragment key prefix>:<path>: the vertex stream of the last matching draw, dumped at frame end (before that the submit has not
 // run the GPU-side copies that fill it, which is why DM_NVN_KEYDUMP shows zeros for such buffers)
 static uint64_t g_vd_addr, g_vd_size; static char g_vd_path[512]; static int g_vd_on;
-static FILE *g_vtbl; static long g_vt_frame = -1;   // DM_VBUF_DUMP per-draw table (frame, pass, baseVertex, page, uniform r1)
+static FILE *g_vtbl; static long g_vt_frame = -1;
+static uint64_t g_smp[128]; static int g_smp_n; static uint64_t g_smp_f = ~0ull;   // pages sampled by the watched shader this frame (DM_TEXDUMP_EXTRA=all)   // DM_VBUF_DUMP per-draw table (frame, pass, baseVertex, page, uniform r1)
+static int g_last_bind_stages = -1;   // stage mask of the most recent program bind (diagnostic: what a dropped dispatch was bound with)
 static int g_kd_force;   // the draw DM_NVN_KEYDUMP matched: force the per-binding records on (see kd_draw)
 static int passdump(void) {
     if (g_kd_force) return 1;
@@ -3462,7 +3464,7 @@ static int first_draw_covers(int i, id<MTLTexture> t, NSUInteger level) {
 static int state_op(uint32_t op, const void *a) {
     switch (op) {
         case OP_SCISSOR: R.sc = *(const p_scissor *)a; R.has_sc = 1; break;
-        case OP_BIND_PROGRAM: { const p_bind_program *bp_ = a; const prog_t *np = bind_stages(bp_->prog, bp_->stages); if (np != S.prog) { S.prog = np; g_pso_dirty = 1; args_dirty_all(); } break; }
+        case OP_BIND_PROGRAM: { const p_bind_program *bp_ = a; g_last_bind_stages = bp_->stages; const prog_t *np = bind_stages(bp_->prog, bp_->stages); if (np != S.prog) { S.prog = np; g_pso_dirty = 1; args_dirty_all(); } break; }
         case OP_BIND_STATE: {
             const p_bind_state *b = a; void *dst = NULL; size_t n = 0;
             blend_st bs;
@@ -5000,6 +5002,9 @@ frz_plain:;
                   if (g_vtbl) {
                       uint64_t hh = S.tex[1][0]; int tid = (int)(hh & 0xfffff);
                       uint64_t ser = (tid > 0 && tid < (1 << 20)) ? atomic_load_explicit(&g_tser[tid], memory_order_relaxed) : 0;
+                      if (fr != g_smp_f) { g_smp_f = fr; g_smp_n = 0; }
+                      if (ser) { int dup = 0; for (int q = 0; q < g_smp_n; q++) if (g_smp[q] == ser) dup = 1;
+                          if (!dup && g_smp_n < 128) g_smp[g_smp_n++] = ser; }
                       int bv = dw ? 0 : (di ? di->base_vertex : 0), cnt = dw ? dw->count : (di ? di->count : 0);
                       fprintf(g_vtbl, "%llu %llu %d %d %llu %llu %d %llu", (unsigned long long)fr, (unsigned long long)g_stat_pass, bv, cnt,
                           (unsigned long long)S.vbuf[0].address, (unsigned long long)S.stream[0].stride, (int)(dw ? dw->prim : di->prim),
@@ -5309,7 +5314,8 @@ static void dispatch(const p_dispatch *dp) {
     NvShader *cs = prog_get(S.prog)->sh[5];
     if (!cs) { RED_ONCE(28, "派发的程序没有计算着色器（或未映射）");
         if (getenv("DM_NVN_DISPATCHLOG")) { extern const char *nvn_prog_key(const void *, int);
-            LOG("[dispatch] 程序 %p 键：vs=%s ps=%s cs=%s", (void *)S.prog, nvn_prog_key(S.prog, 0) ?: "-", nvn_prog_key(S.prog, 1) ?: "-", nvn_prog_key(S.prog, 5) ?: "-"); }
+            LOG("[dispatch] 程序 %p 键：vs=%s ps=%s cs=%s 线程组 %ux%ux%u 阶段掩码=%#x nstage=%u", (void *)S.prog, nvn_prog_key(S.prog, 0) ?: "-", nvn_prog_key(S.prog, 1) ?: "-", nvn_prog_key(S.prog, 5) ?: "-",
+                dp->x, dp->y, dp->z, g_last_bind_stages, (unsigned)((const prog_t *)S.prog)->nstage); }
         return; }
     const void *k = (__bridge const void *)cs;
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
@@ -6225,10 +6231,20 @@ static void td_dump(void) {
         // big1024 = every registered texture at least 1024x1024 (the big atlases get different serials in different runs, so a serial list does not carry over)
         const char *q = getenv("DM_TEXDUMP_EXTRA");
         for (; q && *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) {
-            if (!strncmp(q, "big", 3)) {
-                int min = atoi(q + 3); if (min <= 0) min = 1024;
+            if (!strncmp(q, "big", 3) || !strncmp(q, "all", 3)) {
+                int min = !strncmp(q, "all", 3) ? 0 : atoi(q + 3); if (min <= 0 && strncmp(q, "all", 3)) min = 1024;
                 enum { ND = 64 };
                 uint64_t ser[ND]; uint32_t fmt[ND], ww[ND], hh[ND], up[ND]; int n = 0;
+                if (!strncmp(q, "all", 3)) {   // the pages the watched shader actually sampled this frame come first (the registry order would miss them)
+                    for (int i = 0; i < g_smp_n && n < ND; i++) {
+                        id o = serial_get(g_smp[i]); id<MTLTexture> m = [o isKindOfClass:[NvPkg class]] ? ((NvPkg *)o)->tex : o;
+                        if (!m) continue;
+                        BOOL seen = NO; for (NSArray *e in g_td_list) if ([e[1] unsignedLongLongValue] == g_smp[i]) seen = YES;
+                        if (seen) continue;
+                        [g_td_list addObject:@[m, @(g_smp[i]), @(0), @(0)]];
+                        MLOG("[texdump] 采样页 ser=%llu MTL 格式 %lu %lux%lu", (unsigned long long)g_smp[i], (unsigned long)m.pixelFormat, (unsigned long)m.width, (unsigned long)m.height);
+                    }
+                }
                 pthread_mutex_lock(&g_rmu);
                 for (int i = 0; i < g_ntreg && n < ND; i++) {
                     const tex_t *t = &g_treg[i].t;
