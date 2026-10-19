@@ -806,7 +806,9 @@ NVN(nvnCommandBufferSetStencilRef, void, NVNcommandBuffer *c, NVNface f, int v) 
 NVN(nvnCommandBufferSetPolygonOffsetClamp, void, NVNcommandBuffer *c, float fa, float un, float cl) {
     *REC(c, OP_POLY_OFFSET, p_poly_offset) = (p_poly_offset){fa, un, cl};
 }
-NVN(nvnCommandBufferDrawArrays, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n) { *REC(c, OP_DRAW, p_draw) = (p_draw){pr, first, n, 1, 0}; }
+static _Atomic uint64_t g_guest_draws;
+uint64_t dm_guest_draw_count(void) { return atomic_load(&g_guest_draws); }
+NVN(nvnCommandBufferDrawArrays, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n) { atomic_fetch_add(&g_guest_draws, 1); *REC(c, OP_DRAW, p_draw) = (p_draw){pr, first, n, 1, 0}; }
 NVN(nvnCommandBufferDrawElementsInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib,
     int bv, int bi, int inst) {
     *REC(c, OP_DRAW_IDX, p_draw_idx) = (p_draw_idx){pr, it, n, bv, bi, inst, ib};
@@ -963,8 +965,6 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
 static void nvn_nop(void) {}
 static const char *const g_nops[] = {
     "nvnCommandBufferSetPatchSize",
-    "nvnCommandBufferMultiDrawArraysIndirectCount",
-    "nvnCommandBufferMultiDrawElementsIndirectCount",
     "nvnCommandBufferDispatchComputeIndirect",
     "nvnCommandBufferSetDepthBounds",
     "nvnCommandBufferWaitSync",
@@ -1098,7 +1098,8 @@ static void dump_frame(void) {
     }
     if (g_tsv) fflush(g_tsv);
     if (g_frame <= (uint64_t)nframes) LOG("[nvn] %s %llu：%u 个函数 %llu 次调用 |%s", g_frame ? "帧" : "初始化", g_frame, nfn, total, line);
-    else if (g_frame % 300 == 0) LOG("[nvn] 帧 %llu：%u 个函数 %llu 次调用", g_frame, nfn, total);
+    else if (g_frame % 300 == 0) { extern uint64_t dm_mtl_draw_count(void);
+        LOG("[nvn] 帧 %llu：%u 个函数 %llu 次调用｜绘制 记录 %llu / 回放 %llu", g_frame, nfn, total, (unsigned long long)dm_guest_draw_count(), (unsigned long long)dm_mtl_draw_count()); }
     g_frame++; cs_dump();
     // Every 300 frames read resident memory and hand it to the graphics layer to print the memory readout line (mtl_mem_stat, low frequency, capped). Memory watchdog: when resident memory exceeds the cap, log a failure and exit on its own. On by default only on the Mac host (24 GB: runaway host memory
     // drags the whole machine into a kernel panic, which happened twice with other programs on the same machine), or set for tests with DM_MEM_CAP_GB=<integer>; the player's iOS app has no cap (exiting before the system kills it is pointless and only adds another kind of crash)
@@ -1638,8 +1639,26 @@ NVN(nvnCommandBufferDrawElementsBaseVertex, void, NVNcommandBuffer *c, NVNdrawPr
 NVN(nvnCommandBufferDrawArraysInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n, int bi, int inst) {
     *REC(c, OP_DRAW, p_draw) = (p_draw){pr, first, n, inst, bi};
 }
+// GPU-driven draws: the parameter block stays in guest memory and is read back at replay time (see nvn_mtl.m). AA456 renders the
+// evidence 3D model through MultiDrawElementsIndirectCount, which used to be a silent no-op.
+static void rec_draw_ind(NVNcommandBuffer *c, NVNdrawPrimitive pr, int itype, NVNbufferAddress ibuf, NVNbufferAddress ind, NVNbufferAddress cnt,
+                         int max, ptrdiff_t stride, int one) {
+    p_draw_ind *r = REC(c, OP_DRAW_IND, p_draw_ind);
+    *r = (p_draw_ind){ibuf, ind, cnt, (int64_t)stride, pr, itype, max, one ? 1 : 0};
+}
 NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind) {
-    (void)c; (void)pr; (void)it; (void)ib; (void)ind; ONCE_LOG("【红】DrawElementsIndirect：宿主未实现（跳过）");
+    rec_draw_ind(c, pr, it, ib, ind, 0, 1, 0, 1);
+}
+NVN(nvnCommandBufferDrawArraysIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNbufferAddress ind) {
+    rec_draw_ind(c, pr, -1, 0, ind, 0, 1, 0, 1);
+}
+NVN(nvnCommandBufferMultiDrawElementsIndirectCount, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib,
+    NVNbufferAddress ind, NVNbufferAddress cnt, int max, ptrdiff_t stride) {
+    rec_draw_ind(c, pr, it, ib, ind, cnt, max, stride, 0);
+}
+NVN(nvnCommandBufferMultiDrawArraysIndirectCount, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNbufferAddress ind, NVNbufferAddress cnt,
+    int max, ptrdiff_t stride) {
+    rec_draw_ind(c, pr, -1, 0, ind, cnt, max, stride, 0);
 }
 
 // Viewport / scissor / depth range: single and multiple forms

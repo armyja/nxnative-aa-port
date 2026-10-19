@@ -3339,7 +3339,7 @@ static int ds_scan(const uint8_t *p, ds_st *ds, int depth) {
             case OP_SET_RT: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_UPDATE_UB: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_CLEAR_TEX: case OP_DISPATCH: return DS_FREE;
             case OP_CLEAR_COLOR: case OP_CLEAR_DS: g_ds_why = h.op; return DS_USED;
             case OP_BIND_STATE: { const p_bind_state *b = a; if (b->kind == 5) memcpy(ds, b->bytes, sizeof *ds); break; }
-            case OP_DRAW: case OP_DRAW_IDX:   // Depth test / write → depth needed; stencil test → stencil needed; can stop once both are needed
+            case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IND:   // Depth test / write → depth needed; stencil test → stencil needed; can stop once both are needed
                 g_ds_need |= (ds->dt || ds->dw ? 1 : 0) | (ds->st ? 2 : 0);
                 if (g_ds_need == 3) { g_ds_why = 1000 + ds->dt * 100 + ds->dw * 10 + ds->st; return DS_USED; } break;
             default: break;
@@ -3725,7 +3725,7 @@ static void sdx_walk(const uint8_t *p, int depth) {
                 if (b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) g_pp_slot[b->stage][base + b->first + k] = h_ser(b->h[k]);
                 break; }
             case OP_BIND_PROGRAM: g_pp_prog = ((const p_bind_program *)a)->prog; break;
-            case OP_DRAW: case OP_DRAW_IDX: case OP_DISPATCH: {
+            case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IND: case OP_DISPATCH: {
                 if (h.op != OP_DISPATCH) seq_push(&g_drx_seq, &g_drx_n, &g_drx_cap, seq);
                 __unsafe_unretained NvProg *pr = g_pp_prog ? prog_get(g_pp_prog) : nil;
                 if (!pr) { for (int st = 0; st < 6; st++) for (int k = 0; k < 160; k++) if (g_pp_slot[st][k]) sdx_ev_add((sdx_ev){seq, 0, g_pp_slot[st][k], p, 0, 0, SDX_READ, 0, 0, 1}); }
@@ -3823,7 +3823,7 @@ static void hoist_try(void) {
         switch (h.op) {
             case OP_END: case OP_CALL: case OP_COPY_T2T: case OP_COPY_B2T: case OP_COPY_T2B: case OP_CLEAR_TEX: case OP_DISPATCH: return;
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
-            case OP_DRAW: case OP_DRAW_IDX: if (in_grp) return; break;
+            case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IND: if (in_grp) return; break;
             case OP_SCISSOR: sc = *(const p_scissor *)a; has_sc = 1; break;
             case OP_BIND_TEX: case OP_BIND_IMG: { const p_bind_handles *b = a; bh_fresh(b); for (int k = 0; k < b->n && k < 32 && nbh < 512; k++) if (b->h[k]) bh[nbh++] = b->h[k]; break; }
             case OP_CLEAR_COLOR: case OP_CLEAR_DS: {
@@ -4113,7 +4113,7 @@ static void defer_try(const p_draw *dw, const p_draw_idx *di) {
             case OP_BIND_TEX: case OP_BIND_IMG: { const p_bind_handles *b = a; bh_fresh(b); int lim = h.op == OP_BIND_IMG ? 32 : 128;
                 if (b->stage >= 0 && b->stage < 6 && b->first >= 0 && b->first + b->n <= lim) for (int k = 0; k < b->n; k++) { if (h.op == OP_BIND_IMG) img[b->stage][b->first + k] = b->h[k]; else tex[b->stage][b->first + k] = b->h[k]; } break; }
             case OP_BIND_STATE: { const p_bind_state *b = a; if (b->kind == 5) memcpy(&ds, b->bytes, sizeof ds); break; }
-            case OP_DRAW: case OP_DRAW_IDX:
+            case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IND:
                 if (defer_prog_hits(pg, tex, img, &g_defer.p_rt, 1, 1)) { /* Suggestion: here, after identifying that an output mapping is needed but _bf is missing, call bf_want_note. */ g_defer.reason = 7; goto fail; }
                 if (p_end) {   // Draws in the intermediate range: must not write textures P reads, must not write P's depth-stencil (and must not test stencil when P writes stencil)
                     if (srt_hit < 0) { srt_hit = 0; for (int k = 0; k < scan_rt.n && !srt_hit; k++) if (scan_rt.color[k] && defer_rt_hits_reads(&scan_rt, k)) srt_hit = 1; }   // Attachments change only at SetRenderTargets: computed once per segment
@@ -4816,7 +4816,10 @@ static void fb_prepare(NvProg *pr) {
         } }
     if (g_fb_n) { g_fb_seq = g_draw_seq; args_dirty_all(); g_fb_rebind = 1; }
 }
+static _Atomic uint64_t g_replay_draws;
+uint64_t dm_mtl_draw_count(void) { return atomic_load(&g_replay_draws); }
 static void draw(const p_draw *dw, const p_draw_idx *di) {
+    atomic_fetch_add(&g_replay_draws, 1);
     if (!S.prog) { RED_ONCE(18, "绘制前没有绑定程序"); PDS("Z %llu 绘制跳过：没有绑定程序", g_stat_pass + !g_enc); return; }
     __unsafe_unretained NvProg *pr = prog_get(S.prog);
     if (g_ruler_truth == 0) {   // Ruler negative control (DM_NVN_RULER_NEG=<fragment key>): in the mode under test drop this shader's draws, and the ruler must report non-equivalence
@@ -5884,6 +5887,26 @@ void mtl_exec(const uint8_t *p) {
             }
             case OP_DRAW: g_exec_next = p + h.size; draw(a, NULL); g_exec_next = NULL; break;   // Lookahead start point
             case OP_DRAW_IDX: g_exec_next = p + h.size; draw(NULL, a); g_exec_next = NULL; break;
+            case OP_DRAW_IND: {
+                const p_draw_ind *d = a;
+                void *mb; uint64_t mo;
+                uint32_t n = d->max > 0 ? (uint32_t)d->max : 1;
+                if (!d->one && d->countbuf && mtl_addr(d->countbuf, 4, &mb, &mo)) {
+                    uint32_t c = *(const uint32_t *)((const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo);
+                    if (c < n) n = c;
+                }
+                size_t stride = d->stride > 0 ? (size_t)d->stride : (d->itype >= 0 ? 20u : 16u);
+                g_exec_next = p + h.size;
+                for (uint32_t i = 0; i < n; i++) {
+                    void *ib; uint64_t io;
+                    if (!mtl_addr(d->indbuf + (uint64_t)i * stride, stride, &ib, &io)) break;
+                    const uint32_t *q = (const uint32_t *)((const uint8_t *)[(__bridge id<MTLBuffer>)ib contents] + io);
+                    p_draw_idx di = {d->prim, d->itype, (int32_t)q[0], (int32_t)(d->itype >= 0 ? q[3] : 0), (int32_t)(d->itype >= 0 ? q[4] : q[3]), (int32_t)q[1], d->ibuf};
+                    p_draw da = {d->prim, (int32_t)q[2], (int32_t)q[0], (int32_t)q[1], (int32_t)(d->itype >= 0 ? q[4] : q[3])};
+                    if (d->itype >= 0) draw(NULL, &di); else draw(&da, NULL);
+                }
+                g_exec_next = NULL;
+                break; }
             // Do not mark dirty if the state did not change (the game often re-sends the same program / state block / vertex format before each draw; the dirty flag only decides whether to re-fetch the pipeline / depth-stencil object, and equal values mean the same object)
             case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
             case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
