@@ -212,7 +212,13 @@ void front_run(void (*guest)(void)) {
             // the game view, otherwise the resize freezes.
             static int owner;   // 0 none, 1 touch (started in the game view), 2 system (title bar / border / buttons)
             NSRect vf = [v convertRect:v.bounds toView:nil];
-            BOOL inView = NSPointInRect(e.locationInWindow, vf);
+            // macOS' own resize zone reaches a little inside the frame and shows the resize cursor there, so the
+            // outer few points of the picture belong to the window, not to the game's touch area.
+            const double edge = 8.0;
+            NSPoint p0 = e.locationInWindow;
+            BOOL nearEdge = p0.x < vf.origin.x + edge || p0.x > vf.origin.x + vf.size.width - edge ||
+                            p0.y < vf.origin.y + edge || p0.y > vf.origin.y + vf.size.height - edge;
+            BOOL inView = NSPointInRect(p0, vf) && !nearEdge;
             if (e.type == NSEventTypeLeftMouseDown) {
                 NSButton *zoom = [win standardWindowButton:NSWindowZoomButton];
                 if (zoom && !zoom.hidden && NSPointInRect(e.locationInWindow, [zoom convertRect:zoom.bounds toView:nil])) {
