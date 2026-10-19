@@ -2,6 +2,7 @@
 // Without DM_WINDOW: the guest runs directly on the current thread, behaving the same as with no front end (windowless tests use this).
 // Key map (Nintendo layout): WASD left stick, arrow keys D-pad, J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−.
 #import <Cocoa/Cocoa.h>
+#import <objc/runtime.h>
 #import <GameController/GameController.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
@@ -147,6 +148,15 @@ void front_run(void (*guest)(void)) {
         win.title = @DM_GAME_NAME;   // the game profile's name (game name label)
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;   // green button = real fullscreen (without this it only zooms)
         { static DMWinDelegate *wd; wd = [DMWinDelegate new]; win.delegate = wd; }   // 16:9 while dragging (see windowWillResize)
+        if (getenv("DM_WINDOW_PROBE")) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{   // probe: which points belong to the game view
+            NSView *cv = win.contentView; NSView *theme = cv.superview; if (!theme) return;
+            // Scan from the bottom-left corner inwards: tells us exactly how wide AppKit's resize border is here.
+            for (int d = 1; d <= 12; d++) {
+                NSPoint wp = [cv convertPoint:NSMakePoint(d, d) toView:nil];
+                NSView *h = [theme hitTest:[theme convertPoint:wp fromView:nil]];
+                LOG("[窗口] 命中测试 距角 %d 点: %s", d, h ? object_getClassName(h) : "nil");
+            }
+        });
         // Minimal main menu: without one there is no "Enter Full Screen" item and no Command-Control-F, and Command-Q does not quit
         {
             NSMenu *bar = [[NSMenu alloc] init];
@@ -211,14 +221,12 @@ void front_run(void (*guest)(void)) {
             // A live resize that starts on the window border must keep every drag, even while the cursor crosses
             // the game view, otherwise the resize freezes.
             static int owner;   // 0 none, 1 touch (started in the game view), 2 system (title bar / border / buttons)
-            NSRect vf = [v convertRect:v.bounds toView:nil];
-            // macOS' own resize zone reaches a little inside the frame and shows the resize cursor there, so the
-            // outer few points of the picture belong to the window, not to the game's touch area.
-            const double edge = 8.0;
-            NSPoint p0 = e.locationInWindow;
-            BOOL nearEdge = p0.x < vf.origin.x + edge || p0.x > vf.origin.x + vf.size.width - edge ||
-                            p0.y < vf.origin.y + edge || p0.y > vf.origin.y + vf.size.height - edge;
-            BOOL inView = NSPointInRect(p0, vf) && !nearEdge;
+            // Ask AppKit itself: the theme frame's hit test returns the game view only where a click belongs to the
+            // game. In the title bar, the traffic lights and the resize border it returns other views, so there is
+            // nothing to guess about the width of the resize zone.
+            NSView *theme = win.contentView.superview;
+            NSView *hit = theme ? [theme hitTest:[theme convertPoint:e.locationInWindow fromView:nil]] : nil;
+            BOOL inView = (hit == v) || (hit && [hit isDescendantOf:v]);
             if (e.type == NSEventTypeLeftMouseDown) {
                 NSButton *zoom = [win standardWindowButton:NSWindowZoomButton];
                 if (zoom && !zoom.hidden && NSPointInRect(e.locationInWindow, [zoom convertRect:zoom.bounds toView:nil])) {
