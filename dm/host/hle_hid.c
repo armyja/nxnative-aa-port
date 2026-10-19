@@ -3,6 +3,7 @@
 // Vibration, six-axis, mouse, keyboard: not provided by the host (device count 0 / not connected); the controller applet reports "1 player, current controller selected".
 #include "hle.h"
 #include "dm_input.h"
+#include "front.h"   // dm_touch_set: DM_CTL can drive the touchscreen
 #include <stdatomic.h>
 #include <unistd.h>
 #include <strings.h>
@@ -116,7 +117,11 @@ static void *ctl_main(void *arg) {
             kt = (long long)sb.st_mtimespec.tv_sec * 1000000000ll + sb.st_mtimespec.tv_nsec;
             buf[0] = 0; FILE *f = fopen(p, "r"); if (f) { if (!fgets(buf, sizeof buf, f)) buf[0] = 0; fclose(f); } char *nl = strchr(buf, '\n'); if (nl) *nl = 0;
             uint64_t b = 0; int32_t lx = 0, ly = 0, rx = 0, ry = 0; double hold;
-            if (buf[0] && ctl_parse(buf, &b, &lx, &ly, &rx, &ry, &hold) && (b || lx || ly || rx || ry)) {
+            if (buf[0] == '@') {   // touchscreen: "@x,y" puts the finger down / moves it (normalized coordinates, top-left origin), "@up" lifts it
+                if (!strcasecmp(buf, "@up")) { dm_touch_set(NULL, 0); LOG("DM_CTL：抬手"); }
+                else { double x, y; if (sscanf(buf + 1, "%lf,%lf", &x, &y) == 2) { dm_touch t = {0, (float)x, (float)y}; dm_touch_set(&t, 1); LOG("DM_CTL：触点 %g,%g", x, y); }
+                       else LOG("【红】DM_CTL：认不出的触点 %s", buf); }
+            } else if (buf[0] && ctl_parse(buf, &b, &lx, &ly, &rx, &ry, &hold) && (b || lx || ly || rx || ry)) {
                 LOG("DM_CTL：按 %s（%#llx 摇杆 %d,%d 右摇杆 %d,%d 按住 %.2f s）", buf, (unsigned long long)b, lx, ly, rx, ry, hold);
                 script_set(b, lx, ly, rx, ry); usleep((useconds_t)(hold * 1e6)); script_set(0, 0, 0, 0, 0);
             } else if (buf[0]) LOG("【红】DM_CTL：认不出的按键串 %s", buf);

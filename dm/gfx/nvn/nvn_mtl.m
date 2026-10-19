@@ -3510,7 +3510,12 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         } else if (b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_UBOP) {   // B: storage buffers / compute-stage uniforms are device pointers; the address is taken by NVN slot
             const p_bind_buf *u = reg < 16 ? (b->kind == NVN_RB_UBOP ? &S.ubo[nvn_stage][reg] : &S.ssbo[nvn_stage][reg]) : NULL;
             void *mb; uint64_t mo, gpu;
-            if (u && u->addr && mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) { use_rec("buf", u->addr, u->size, 0, NULL); slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); }
+            // DM_UB_STAGE: a uniform bound as a device pointer reads the staging copy too, like a normal uniform buffer
+            if (u && u->addr && b->kind == NVN_RB_UBOP && ub_bind_range(u->addr, u->size, &mb, &mo, &gpu)) {
+                use_rec("buf", u->addr, u->size, 0, NULL); slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, MTLResourceUsageRead);
+            } else if (u && u->addr && mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) {
+                if (u->size && ub_stage_overlap(u->addr, u->addr + u->size)) RED_ONCE(50, "设备指针形式绑定的% s（阶段 %d 槽 %d）读到的是旧嘉宾字节", b->kind == NVN_RB_UBOP ? " uniform" : "存储缓冲", nvn_stage, reg);
+                use_rec("buf", u->addr, u->size, 0, NULL); slots[aid] = gpu; USE((__bridge id<MTLBuffer>)mb, b->rw ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead); }
             else { slots[aid] = dummy_buf_gpu(); USE(dummy_buf(), MTLResourceUsageRead); }
             if (bl) PD("B %llu st%d sbufp reg%d %s addr=%#llx size=%llu %s", g_stat_pass, nvn_stage, reg, u && u->addr ? "实" : "哑", u ? (unsigned long long)u->addr : 0ull, u ? (unsigned long long)u->size : 0ull, b->rw ? "rw" : "ro");
         } else if (b->kind == NVN_RB_C1) {      // B: the shader's own constant segment, built when the shader is fetched
@@ -3536,7 +3541,10 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                     // the address of uniform buffer 7 (the light parameters, 144 bytes per light); Breath of the Wild's compute shaders read 0x280 / 0x290 / 0x2d0 of the same table
                     if (nvn_stage == 5) {
                         memcpy(d + 0x200, g_dispatch_dim, 12);
-                        for (int r = 0; r < 16; r++) { uint64_t a = S.ubo[5][r].addr; uint32_t n = (uint32_t)S.ubo[5][r].size; memcpy(d + 0x210 + 16 * r, &a, 8); memcpy(d + 0x210 + 16 * r + 8, &n, 4); }
+                        for (int r = 0; r < 16; r++) { uint64_t a = S.ubo[5][r].addr; uint32_t n = (uint32_t)S.ubo[5][r].size; void *rmb; uint64_t rmo, rg;   // staged copy when this submission rewrote it
+                            if (a && n && ub_bind_range(a, n, &rmb, &rmo, &rg)) a = rg;
+                            else if (a && n && S.ubo[5][r].size && ub_stage_overlap(a, a + n)) RED_ONCE(51, "计算阶段 c0 uniform 表里的槽 %d 读到的是旧嘉宾字节", r);
+                            memcpy(d + 0x210 + 16 * r, &a, 8); memcpy(d + 0x210 + 16 * r + 8, &n, 4); }
                     }
                 } else {
                     for (int r = 0; r < DM_GAME_NVN_TEX_SLOTS; r++) { uint32_t th = (uint32_t)S.tex[nvn_stage][r]; memcpy(d + DM_GAME_NVN_TEX_BASE + 8 * r, &th, 4); }
@@ -6348,17 +6356,19 @@ void mtl_exec(const uint8_t *p) {
                 if (!d->one && d->countbuf && mtl_addr(d->countbuf, 4, &mb, &mo)) {
                     uint32_t c = *(const uint32_t *)((const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo);
                     if (c < n) n = c;
+                    if (pend_hits(d->countbuf, 4)) RED_ONCE(48, "间接绘制的计数块本提交里有挂起写：CPU 读到的是旧值（数出来的笔数是错的）");
                 }
                 size_t stride = d->stride > 0 ? (size_t)d->stride : (d->itype >= 0 ? 20u : 16u);
                 { static int dl2 = -1; if (dl2 < 0) dl2 = getenv("DM_NVN_DRAWLOG") != NULL;
-                  if (dl2) LOG("[drawind] 图元 %d 索引类型 %d max=%d 计数=%u stride=%zu 参数块=%#llx 计数块=%#llx", d->prim, d->itype, d->max, n, stride, (unsigned long long)d->indbuf, (unsigned long long)d->countbuf); }
+                  if (dl2) LOG("[drawind] 帧 %llu 图元 %d 索引类型 %d max=%d 计数=%u stride=%zu 参数块=%#llx 计数块=%#llx", (unsigned long long)atomic_load(&g_cur_frame), d->prim, d->itype, d->max, n, stride, (unsigned long long)d->indbuf, (unsigned long long)d->countbuf); }
                 g_exec_next = p + h.size;
                 for (uint32_t i = 0; i < n; i++) {
                     void *ib; uint64_t io;
                     if (!mtl_addr(d->indbuf + (uint64_t)i * stride, stride, &ib, &io)) break;
+                    if (pend_hits(d->indbuf + (uint64_t)i * stride, stride)) RED_ONCE(49, "间接绘制的参数块本提交里有挂起写：CPU 读到的是旧值（图元数/起始索引是旧的）");
                     const uint32_t *q = (const uint32_t *)((const uint8_t *)[(__bridge id<MTLBuffer>)ib contents] + io);
                     { static int dl3 = -1; if (dl3 < 0) dl3 = getenv("DM_NVN_DRAWLOG") != NULL;
-                      if (dl3) LOG("[drawind]   #%u 参数 count=%u inst=%u first=%u bv=%u bi=%u（ibuf=%#llx）", i, q[0], q[1], q[2], d->itype >= 0 ? q[3] : 0, d->itype >= 0 ? q[4] : q[3], (unsigned long long)d->ibuf); }
+                      if (dl3) LOG("[drawind]   #%u 参数 count=%u inst=%u first=%u bv=%u bi=%u（ibuf=%#llx 计数值=%u）", i, q[0], q[1], q[2], d->itype >= 0 ? q[3] : 0, d->itype >= 0 ? q[4] : q[3], (unsigned long long)d->ibuf, q[0]); }
                     // The NVN indirect block carries a first-index offset into the index buffer on top of baseVertex: the draw record keeps the index buffer
                     // address only, so fold firstIndex * index size into it (the evidence model's material parts start at 240 and 3504, and ignoring this made
                     // two of the three parts draw the wrong triangles - the badge's ribbon/back plate looked torn).
