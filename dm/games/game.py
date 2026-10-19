@@ -98,6 +98,8 @@ def header(g):
     bu = g.get('tex_bc_unpack', 'off')   # BC textures created in the decompressed format (the raw compressed upload path mis-decodes some large pages on AA456)
     tu = g.get('tex_upload', 'off')   # block-linear textures in CPU-visible physical pools that the game fills itself get a one-shot upload (no packaged data, no CPU-write hook): on / off
     if tu not in ('on', 'off'): sys.exit(f'{g.id}: tex_upload 只能是 on / off | tex_upload must be on or off: {tu}')
+    us = g.get('ub_stage', 'off')   # DM_UB_STAGE default: bind each UpdateUniformBuffer's staged copy instead of blitting it into the guest buffer (keeps render passes open): on / off
+    if us not in ('on', 'off'): sys.exit(f'{g.id}: ub_stage 只能是 on / off | ub_stage must be on or off: {us}')
     if pl not in ('simple', 'full'): sys.exit(f'{g.id}: pad_layout 只能是 simple / full | pad_layout must be simple or full: {pl}')
     fbs = g.words('feedback_snap', '')   # fragment shader key prefixes whose same-pass feedback sampling gets a snapshot first (nvn_mtl.m fb_prepare); none by default
     if any(not re.fullmatch(r'[0-9a-f]{8,16}', k) for k in fbs): sys.exit(f'{g.id}: feedback_snap 要写片元着色器键（8–16 位小写十六进制）| feedback_snap takes fragment shader keys (8-16 lowercase hex digits): {fbs}')
@@ -129,6 +131,7 @@ def header(g):
          f'#define DM_GAME_CORE_PREEMPT {int(cp == "on")}',
          f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}',
          f'#define DM_GAME_TEX_UPLOAD_ALL {int(tu == "on")}',
+         f'#define DM_GAME_UB_STAGE {int(us == "on")}',
          f'#define DM_GAME_TEX_BC_UNPACK {int(bu == "on")}',
          f'#define DM_GAME_DESWZ_CPU_MIN {int(dz)}',
          f'#define DM_GAME_PAD_FULL {int(pl == "full")}',

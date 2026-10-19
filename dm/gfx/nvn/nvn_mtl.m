@@ -642,11 +642,14 @@ static id<MTL4ComputeCommandEncoder> blit(void) {
     return e;
 }
 
+static void ub_drop_range(uint64_t lo, uint64_t hi);   // uniform staging: a GPU-side write supersedes staged records for the range
+static void ub_dirty_ranges(uint64_t lo, uint64_t hi);  // uniform staging: a staged update changes bytes without changing the bound address
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
     if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1;
     void *sb, *db; uint64_t so, dof;
     if (!mtl_addr(src, n, &sb, &so) || !mtl_addr(dst, n, &db, &dof))
         MDIE("缓冲拷贝地址不在任何内存池内 src=%#llx dst=%#llx n=%#llx", (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n);
+    ub_drop_range(dst, dst + n);
     enc_b_copy_buffer(blit_buf(src, src + n, dst, dst + n), (__bridge id<MTLBuffer>)sb, so, (__bridge id<MTLBuffer>)db, dof, n);
 }
 
@@ -656,10 +659,84 @@ static id<MTLBuffer> g_ubs_buf; static size_t g_ubs_off, g_ubs_size;
 // DM_UB_STAGE=1: instead of blitting each uniform update into the guest buffer (which ends the render pass and blocks same-target pass merging),
 // remember where the staged bytes are and bind that staging copy for the draws that read this range. The staging ring outlives the submission.
 typedef struct { uint64_t lo, hi; id<MTLBuffer> buf; uint64_t off; } ub_stage;
-static ub_stage g_ubs[128]; static int g_nubs; static int g_ubs_on = -1;
+enum { UB_STAGE_MAX = 4096 };
+static ub_stage g_ubs[UB_STAGE_MAX]; static int g_nubs; static int g_ubs_on = -1; static uint64_t g_ub_sub;
+static uint64_t g_ubst_full, g_ubst_bake, g_ubst_miss, g_ubst_drop, g_ubst_maxn, g_ubst_dirty;   // binds resolved from the staging copy / baked / left to the stale guest bytes; records dropped by a later copy; peak records per submission
+// A GPU-side write into a range supersedes every staged record for it: those binds have to read the guest buffer again,
+// which now holds the copied bytes (an empty record - lo above any address - never matches).
+static void ub_drop_range(uint64_t lo, uint64_t hi) {
+    if (g_ubs_on <= 0) return;
+    for (int i = 0; i < g_nubs; i++) if (g_ubs[i].lo < hi && g_ubs[i].hi > lo) { g_ubs[i].lo = ~0ull; g_ubs[i].hi = 0; g_ubst_drop++; }
+}
+// Newest record wins: the game reuses one scratch slot for the constants of many draws within one submission, so the
+// update in force at a bind is the last one appended before it (records are appended in submission order).
 static int ub_stage_hit(uint64_t addr, uint64_t size, __unsafe_unretained id<MTLBuffer> *buf, uint64_t *off) {
     if (g_ubs_on <= 0) return 0;
-    for (int i = 0; i < g_nubs; i++) if (g_ubs[i].lo <= addr && g_ubs[i].hi >= addr + size) { *buf = g_ubs[i].buf; *off = g_ubs[i].off + (addr - g_ubs[i].lo); return 1; }
+    for (int i = g_nubs - 1; i >= 0; i--) if (g_ubs[i].lo <= addr && g_ubs[i].hi >= addr + size) { *buf = g_ubs[i].buf; *off = g_ubs[i].off + (addr - g_ubs[i].lo); return 1; }
+    return 0;
+}
+static int ub_stage_overlap_from(uint64_t lo, uint64_t hi, int from) {
+    for (int i = g_nubs - 1; i >= from; i--) if (g_ubs[i].lo < hi && g_ubs[i].hi > lo) return 1;
+    return 0;
+}
+static int ub_stage_overlap(uint64_t lo, uint64_t hi) { return ub_stage_overlap_from(lo, hi, 0); }
+// Bake: when the game only rewrote part of a bound range (no single staged record covers it), the bytes the GPU must
+// see are "guest buffer, with this submission's staged updates replayed on top in order". Built once per range per
+// submission; a later update touching the range invalidates the copy.
+enum { UB_BAKE_MAX = 1 << 18 };
+static id<MTLBuffer> g_ubbake; static size_t g_ubbake_off, g_ubbake_size;
+static uint64_t g_ubbake_la, g_ubbake_len, g_ubbake_sub; static int g_ubbake_idx = -1; static size_t g_ubbake_slot;
+static int ub_bake(uint64_t addr, uint64_t n, __unsafe_unretained id<MTLBuffer> *buf, uint64_t *off) {
+    if (!n || n > UB_BAKE_MAX) return 0;
+    if (g_ubbake_idx >= 0 && g_ubbake_la == addr && g_ubbake_len == n && g_ubbake_sub == g_ub_sub && !ub_stage_overlap_from(addr, addr + n, g_ubbake_idx)) {
+        *buf = g_ubbake; *off = g_ubbake_slot; return 1; }
+    void *gb; uint64_t go; const uint8_t *src;
+    if (!mtl_addr(addr, n, &gb, &go) || !(src = (const uint8_t *)[(__bridge id<MTLBuffer>)gb contents])) return 0;
+    size_t need = (size_t)((n + 255) & ~255ull);
+    if (!g_ubbake || g_ubbake_off + need > g_ubbake_size) {
+        if (g_ubbake) defer_obj_release(g_ubbake);   // copies already encoded still reference the old block: release after this submission completes
+        g_ubbake_size = MAX((size_t)1 << 20, need);
+        g_ubbake = [g_dev newBufferWithLength:g_ubbake_size options:MTLResourceStorageModeShared];
+        if (!g_ubbake) MDIE("uniform 烘焙环分配失败 %#zx", g_ubbake_size);
+        res_add(g_ubbake); g_ubbake_off = 0; g_ubbake_idx = -1;
+    }
+    uint8_t *dst = (uint8_t *)g_ubbake.contents + g_ubbake_off;
+    memcpy(dst, src + go, (size_t)n);
+    for (int i = 0; i < g_nubs; i++) {
+        uint64_t lo = MAX(g_ubs[i].lo, addr), hi = MIN(g_ubs[i].hi, addr + n);
+        if (lo >= hi) continue;
+        const uint8_t *s = (const uint8_t *)g_ubs[i].buf.contents;
+        if (s) memcpy(dst + (lo - addr), s + g_ubs[i].off + (lo - g_ubs[i].lo), (size_t)(hi - lo));
+    }
+    *buf = g_ubbake; *off = g_ubbake_off;
+    g_ubbake_la = addr; g_ubbake_len = n; g_ubbake_sub = g_ub_sub; g_ubbake_idx = g_nubs; g_ubbake_slot = g_ubbake_off;
+    g_ubbake_off += need;
+    return 1;
+}
+// Bytes the GPU will read for [addr, addr+n). 0 = this submission never wrote it, so the guest buffer already is the truth.
+static int ub_read(uint64_t addr, uint64_t n, void *dst) {
+    __unsafe_unretained id<MTLBuffer> b; uint64_t o; const uint8_t *p;
+    if (!n) return 0;
+    if (ub_stage_hit(addr, n, &b, &o)) { if (!(p = (const uint8_t *)b.contents)) return 0; memcpy(dst, p + o, (size_t)n); return 1; }
+    if (g_ubs_on > 0 && ub_stage_overlap(addr, addr + n)) { if (!ub_bake(addr, n, &b, &o) || !(p = (const uint8_t *)b.contents)) return 0; memcpy(dst, p + o, (size_t)n); return 1; }
+    return 0;
+}
+// First 4 floats as the GPU will read them (diagnostic lines)
+static void ub_dbg4(uint64_t addr, float out[4]) {
+    uint8_t t[16]; out[0] = out[1] = out[2] = out[3] = 0;
+    if (!addr) return;
+    if (!ub_read(addr, 16, t)) memcpy(t, (const void *)addr, 16);
+    memcpy(out, t, 16);
+}
+// Bind-time resolution: 1 = bind this buffer/offset instead of the guest buffer (staging copy, or a baked range).
+static int ub_bind_range(uint64_t addr, uint64_t size, void **mb, uint64_t *mo, uint64_t *gpu) {
+    __unsafe_unretained id<MTLBuffer> b; uint64_t o;
+    if (!size) { if (g_ubs_on > 0 && ub_stage_overlap(addr, addr + 1)) g_ubst_miss++; return 0; }
+    if (ub_stage_hit(addr, size, &b, &o)) { g_ubst_full++; *mb = (__bridge void *)b; *mo = o; *gpu = b.gpuAddress + o; return 1; }
+    if (g_ubs_on > 0 && ub_stage_overlap(addr, addr + size)) {
+        if (ub_bake(addr, size, &b, &o)) { g_ubst_bake++; *mb = (__bridge void *)b; *mo = o; *gpu = b.gpuAddress + o; return 1; }
+        g_ubst_miss++;
+    }
     return 0;
 }
 void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
@@ -676,11 +753,14 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
         res_add(g_ubs_buf); g_ubs_off = 0;
     }
     memcpy((uint8_t *)g_ubs_buf.contents + g_ubs_off, data, n);
-    if (g_ubs_on < 0) { const char *e = getenv("DM_UB_STAGE"); g_ubs_on = e && *e && strcmp(e, "0"); }
-    if (g_ubs_on && g_nubs < 128) {   // bind the staged copy instead of copying into the guest buffer (keeps the render pass open)
+    if (g_ubs_on < 0) { const char *e = getenv("DM_UB_STAGE"); g_ubs_on = e && *e ? strcmp(e, "0") : DM_GAME_UB_STAGE; }   // profile ub_stage, DM_UB_STAGE=0/1 overrides
+    if (g_ubs_on && g_nubs < UB_STAGE_MAX) {   // bind the staged copy instead of copying into the guest buffer (keeps the render pass open)
         g_ubs[g_nubs].lo = dst; g_ubs[g_nubs].hi = dst + n; g_ubs[g_nubs].buf = g_ubs_buf; g_ubs[g_nubs].off = g_ubs_off; g_nubs++;
-    } else {
+        if ((uint64_t)g_nubs > g_ubst_maxn) g_ubst_maxn = (uint64_t)g_nubs;
+        ub_dirty_ranges(dst, dst + n);
+    } else {   // table full: copy for real, and forget the staged records this copy supersedes
         enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), g_ubs_buf, g_ubs_off, (__bridge id<MTLBuffer>)db, dof, n);
+        ub_drop_range(dst, dst + n);
     }
     g_ubs_off += need;
 }
@@ -691,6 +771,7 @@ void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
     if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1;
     void *db; uint64_t dof;
     if (!mtl_addr(dst, n, &db, &dof)) MDIE("缓冲填充地址不在任何内存池内 dst=%#llx n=%#llx", (unsigned long long)dst, (unsigned long long)n);
+    ub_drop_range(dst, dst + n);
     uint8_t b0 = (uint8_t)value;
     if (value == (uint32_t)b0 * 0x01010101u) { [blit_buf(0, 0, dst, dst + n) fillBuffer:(__bridge id<MTLBuffer>)db range:NSMakeRange(dof, n) value:b0]; return; }
     enum { PAT = 0x10000 }; static __strong id<MTLBuffer> pat; static uint32_t pat_v; static int pat_ok;
@@ -810,7 +891,7 @@ int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1) {
 static void rp_flush(void);
 static const char *cctx_snap(void);   // What is in this submission (printed into the failure line on error; defined before mtl_exec)
 uint64_t mtl_sub_commit(void) {
-    g_nubs = 0;   // staging records only apply to this submission
+    g_nubs = 0; g_ub_sub++;   // staging records only apply to this submission
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
     rp_flush();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
@@ -2171,6 +2252,8 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
                             (unsigned long long)g_rp_why_n[1], (unsigned long long)g_rp_why_n[2], (unsigned long long)g_rp_why_n[3], (unsigned long long)g_rp_why_n[4],
                             (unsigned long long)g_rp_why_n[5], (unsigned long long)g_rp_why_n[6], (unsigned long long)g_rp_why_n[7]);
                             memset(g_rp_why_n, 0, sizeof g_rp_why_n); }
+                        if (g_ubs_on > 0) { MLOG("[ubstage] 绑定：暂存直绑 %llu / 烘焙 %llu / 落到旧嘉宾字节 %llu ｜ 记录被拷贝作废 %llu 次 ｜ 每提交记录峰值 %llu ｜ 参数表作废 %llu", (unsigned long long)g_ubst_full, (unsigned long long)g_ubst_bake, (unsigned long long)g_ubst_miss, (unsigned long long)g_ubst_drop, (unsigned long long)g_ubst_maxn, (unsigned long long)g_ubst_dirty);
+                            g_ubst_full = g_ubst_bake = g_ubst_miss = g_ubst_drop = g_ubst_maxn = g_ubst_dirty = 0; }
                         if (getenv("DM_MERGEDBG")) { MLOG("[mergedbg] 拒绝续用原因：未开编码 %llu / 编码模式 %llu / 有挂起清除 %llu / 无目标 %llu / 非 TBDH %llu / 目标不同 %llu / 其它 %llu",
                             (unsigned long long)g_mr_noenc, (unsigned long long)g_mr_mode, (unsigned long long)g_mr_pend, (unsigned long long)g_mr_nort,
                             (unsigned long long)g_mr_notbdr, (unsigned long long)g_mr_diff, (unsigned long long)g_mr_other);
@@ -3269,6 +3352,21 @@ static __unsafe_unretained id<MTLTexture> g_fb_src[4]; static __strong id<MTLTex
 static uint8_t g_args_dirty[6] = {1, 1, 1, 1, 1, 1};
 static uint64_t g_args_reg_seen, g_args_dirty_seen;
 static inline void args_dirty_all(void) { memset(g_args_dirty, 1, sizeof g_args_dirty); }
+// DM_UB_STAGE: a staged update changes the bytes a binding reads without changing the guest address, so a cached
+// argument buffer may still point at the staging copy of an earlier draw: mark every stage that binds an overlapping
+// range dirty (checked against the bindings in force, which for a reused scratch slot is the same range).
+static void ub_dirty_ranges(uint64_t lo, uint64_t hi) {
+    if (g_ubs_on <= 0) return;
+    for (int st = 0; st < 6; st++) {
+        if (g_args_dirty[st]) continue;
+        for (int r = 0; r < 16; r++) {
+            const p_bind_buf *a = &S.ubo[st][r], *b = &S.ssbo[st][r];
+            if ((a->addr && a->size && a->addr < hi && a->addr + a->size > lo) ||
+                (b->addr && b->size && b->addr < hi && b->addr + b->size > lo)) { g_args_dirty[st] = 1; break; }
+        }
+    }
+    g_ubst_dirty++;
+}
 static inline void args_sync_dirty(void) {
     uint64_t reg = g_reg_gen, dirty = nvn_dirty_now();
     if (reg != g_args_reg_seen || dirty != g_args_dirty_seen) {
@@ -3311,11 +3409,7 @@ static uint64_t ui_mat_patch(const p_bind_buf *u, void *mb, uint64_t mo) {
 // Read on the CPU side at replay time (the memory at the same moment a real GPU would read it at execution); slot unbound / out of range / unreadable = 0 (empty slot: dummy texture / dummy sampler).
 // A location with a GPU-side write queued in this submit (pend_hits) is still read at its current value; the first case is reported red.
 // Uniform bytes as the GPU will see them: with DM_UB_STAGE the update was never copied into the guest buffer, so the staged copy is the truth
-static int ub_bytes(uint64_t addr, uint64_t n, void *dst) {
-    __unsafe_unretained id<MTLBuffer> b; uint64_t o;
-    if (ub_stage_hit(addr, n, &b, &o)) { const uint8_t *p = (const uint8_t *)b.contents; if (!p) return 0; memcpy(dst, p + o, (size_t)n); return 1; }
-    return 0;
-}
+static int ub_bytes(uint64_t addr, uint64_t n, void *dst) { return ub_read(addr, n, dst); }
 static uint32_t ubo_handle(int stage, int reg, int off) {
     if (stage < 0 || stage >= 6 || reg < 0 || reg >= 16) return 0;
     const p_bind_buf *u = &S.ubo[stage][reg];
@@ -3328,7 +3422,6 @@ static uint32_t ubo_handle(int stage, int reg, int off) {
     if (!mtl_addr(u->addr + off, 4, &mb, &mo) || !(base = [(__bridge id<MTLBuffer>)mb contents])) return 0;
     memcpy(&h, base + mo, 4); return h;
 }
-static __unsafe_unretained id<MTLBuffer> g_ub_hit_buf; static uint64_t g_ub_hit_off;
 static uint32_t g_dispatch_dim[3];   // the current dispatch's workgroup counts (driver segment c0 + 0x200 for compute)
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex);
 static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
@@ -3353,20 +3446,22 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         if (b->kind == NVN_RB_CBUF) {
             const p_bind_buf *u = reg < 16 ? &S.ubo[nvn_stage][reg] : NULL;
             void *mb; uint64_t mo, gpu;
-            if (u && u->addr && ub_stage_hit(u->addr, u->size, &g_ub_hit_buf, &g_ub_hit_off)) {
-                mb = (__bridge void *)g_ub_hit_buf; mo = g_ub_hit_off; gpu = g_ub_hit_buf.gpuAddress + g_ub_hit_off;
-            } else if (!u || !u->addr || !mtl_gpu_addr(u->addr, 1, &mb, &mo, &gpu)) { RED_ONCE(16, "阶段 %d cb%d 没有绑定 uniform 缓冲", nvn_stage, reg); continue; }
+            if (u && u->addr && ub_bind_range(u->addr, u->size, &mb, &mo, &gpu)) { /* resolved from the staging copy (or a baked range) */ }
+            else if (!u || !u->addr || !mtl_gpu_addr(u->addr, 1, &mb, &mo, &gpu)) { RED_ONCE(16, "阶段 %d cb%d 没有绑定 uniform 缓冲", nvn_stage, reg); continue; }
             use_rec("buf", u->addr, u->size, 0, NULL);
             if (nvn_stage == 0 && reg == 0 && g_ui_moff != 0) { uint64_t pg = ui_mat_patch(u, mb, mo); if (pg) gpu = pg; }
             if (bl) {
+                float f4[4]; ub_dbg4(u->addr, f4);
                 PD("B %llu st%d cb reg%d addr=%#llx size=%llu pool=%#llx+%#llx f=%g,%g,%g,%g", g_stat_pass, nvn_stage, reg, (unsigned long long)u->addr, (unsigned long long)u->size,
-                   (unsigned long long)(u->addr - mo), (unsigned long long)mo, ((float *)u->addr)[0], ((float *)u->addr)[1], ((float *)u->addr)[2], ((float *)u->addr)[3]);
+                   (unsigned long long)(u->addr - mo), (unsigned long long)mo, f4[0], f4[1], f4[2], f4[3]);
                 // DM_NVN_CBDUMP=directory: also saves the whole uniform block to disk as-is (F<frame>_p<pass>_st<stage>_cb<slot>_<address>.bin), for the ground-truth side to compare byte by byte by guest address
                 // DM_NVN_CBDUMP_KEY=shader key: only save for draws using that shader (any stage)
                 static const char *cbd, *cbk; static int cbd_init; if (!cbd_init) { cbd = getenv("DM_NVN_CBDUMP"); cbk = getenv("DM_NVN_CBDUMP_KEY"); cbd_init = 1; }
                 if (cbd && (!cbk || !strcmp(sh->key, cbk))) {
                     char p[1024]; snprintf(p, sizeof p, "%s/F%llu_p%llu_st%d_cb%d_%llx.bin", cbd, (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, nvn_stage, reg, (unsigned long long)u->addr);
-                    FILE *f = fopen(p, "wb"); if (f) { fwrite((const void *)u->addr, 1, u->size, f); fclose(f); } else RED_ONCE(41, "CBDUMP 写不出 %s", p);
+                    uint8_t *t = malloc(u->size ? (size_t)u->size : 1);
+                    if (t) { if (!ub_read(u->addr, u->size, t)) memcpy(t, (const void *)u->addr, (size_t)u->size);
+                        FILE *f = fopen(p, "wb"); if (f) { fwrite(t, 1, (size_t)u->size, f); fclose(f); } else RED_ONCE(41, "CBDUMP 写不出 %s", p); free(t); }
                 }
             }
             slots[aid] = gpu;
@@ -4763,13 +4858,21 @@ static uint64_t ghost_tex(void) {   // The texture actually sampled by this draw
     __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil; NvShader *f = pr ? pr->sh[1] : nil; if (!f) return 0;
     for (int i = 0; i < f->rf.nb; i++) if ((f->rf.b[i].kind == NVN_RB_TEX || f->rf.b[i].kind == NVN_RB_SAMP) && f->rf.b[i].reg < 128 && S.tex[1][f->rf.b[i].reg]) return S.tex[1][f->rf.b[i].reg];
     return 0; }
+// The projection matrix in vertex constant 0 as the GPU will read it (the staged copy when this submission rewrote it)
+static int ui_mat_read(float m[16]) {
+    const p_bind_buf *u = &S.ubo[0][0]; void *mb; uint64_t mo; const uint8_t *p;
+    if (!u->addr || u->size < 64) return 0;
+    if (ub_read(u->addr, 64, m)) return 1;
+    if (pend_hits(u->addr, 64) || !mtl_addr(u->addr, 64, &mb, &mo) || !(p = [(__bridge id<MTLBuffer>)mb contents])) return 0;
+    memcpy(m, p + mo, 64); return 1;
+}
 // Whether the current UI draw is "untextured and exactly covering the whole UI rectangle" (the UI rectangle occupies the upper hf of the texture)
 static int ui_cover_all(double hf) {
     if (S.vbuf[0].size != 80 || ghost_tex()) return 0;
-    const p_bind_buf *u = &S.ubo[0][0]; void *vb, *mb; uint64_t vo, mo; const uint8_t *vp_, *mp_;
-    if (!u->addr || u->size < 64 || pend_hits(u->addr, 64) || pend_hits(S.vbuf[0].address, 80)) return 0;
-    if (!mtl_addr(S.vbuf[0].address, 80, &vb, &vo) || !(vp_ = [(__bridge id<MTLBuffer>)vb contents]) || !mtl_addr(u->addr, 64, &mb, &mo) || !(mp_ = [(__bridge id<MTLBuffer>)mb contents])) return 0;
-    float m[16], x0 = 9, y0 = 9, x1 = -9, y1 = -9; memcpy(m, mp_ + mo, 64);
+    void *vb; uint64_t vo; const uint8_t *vp_;
+    float m[16], x0 = 9, y0 = 9, x1 = -9, y1 = -9;
+    if (pend_hits(S.vbuf[0].address, 80) || !ui_mat_read(m)) return 0;
+    if (!mtl_addr(S.vbuf[0].address, 80, &vb, &vo) || !(vp_ = [(__bridge id<MTLBuffer>)vb contents])) return 0;
     for (int i = 0; i < 4; i++) { float f[2]; memcpy(f, vp_ + vo + 20 * i, 8); float nx = (m[0] * f[0] + m[4] * f[1] + m[12] + 1) / 2, ny = (m[1] * f[0] + m[5] * f[1] + m[13] + 1) / 2;
         x0 = fminf(x0, nx); x1 = fmaxf(x1, nx); y0 = fminf(y0, ny); y1 = fmaxf(y1, ny); }
     return x0 < 0.002f && x1 > 0.998f && y0 < 0.002f && fabsf(y1 - (float)hf) < 0.002f;
@@ -4779,10 +4882,10 @@ static void ghost_note(const p_draw *dw) {
     if (g_gh.pass != g_stat_pass) { for (int i = 0; i < g_gh.n; i++) free(g_gh.c[i].S_); g_gh.n = g_gh.nt = 0; g_gh.pass = g_stat_pass; }
     uint64_t t = ghost_tex(); int k = 0; for (; k < g_gh.nt; k++) if (g_gh.tid[k] == t) break;
     if (k == g_gh.nt && g_gh.nt < 128) { g_gh.tid[k] = t; g_gh.tn[k] = 0; g_gh.nt++; } if (k < g_gh.nt) g_gh.tn[k]++;
-    const p_bind_buf *u = &S.ubo[0][0]; void *vb, *mb; uint64_t vo, mo; const uint8_t *vp_, *mp_;
-    if (!u->addr || u->size < 64 || pend_hits(u->addr, 64) || pend_hits(S.vbuf[0].address, 80)) return;
-    if (!mtl_addr(S.vbuf[0].address, 80, &vb, &vo) || !(vp_ = [(__bridge id<MTLBuffer>)vb contents]) || !mtl_addr(u->addr, 64, &mb, &mo) || !(mp_ = [(__bridge id<MTLBuffer>)mb contents])) return;
-    float m[16], x0 = 9, y0 = 9, x1 = -9, y1 = -9; memcpy(m, mp_ + mo, 64);
+    void *vb; uint64_t vo; const uint8_t *vp_;
+    float m[16], x0 = 9, y0 = 9, x1 = -9, y1 = -9;
+    if (pend_hits(S.vbuf[0].address, 80) || !ui_mat_read(m)) return;
+    if (!mtl_addr(S.vbuf[0].address, 80, &vb, &vo) || !(vp_ = [(__bridge id<MTLBuffer>)vb contents])) return;
     for (int i = 0; i < 4; i++) { float f[2]; memcpy(f, vp_ + vo + 20 * i, 8); float nx = (m[0] * f[0] + m[4] * f[1] + m[12] + 1) / 2, ny = (m[1] * f[0] + m[5] * f[1] + m[13] + 1) / 2;
         x0 = fminf(x0, nx); x1 = fmaxf(x1, nx); y0 = fminf(y0, ny); y1 = fmaxf(y1, ny); }
     { float hf = (float)ui_hfrac(); y0 /= hf; y1 /= hf; }   // The points given by the front end are normalized coordinates within the UI rectangle; when the UI occupies only the upper hf portion of the texture, convert to the same convention (unchanged when hf = 1)
@@ -4818,16 +4921,19 @@ static void ghost_flush(void) {   // Before the render pass ends: translate the 
 // Run the same switch once on the Mac and once on the device and compare item by item to see which input differs on the device (Super Mario 3D World + Bowser's Fury's magenta squares in 1-1: particle 5e4de7561c670fee, iPhone only, not reproducible on the Mac)
 static uint32_t kd_tw, kd_th;   // DM_NVN_KEYDUMP's optional target-size filter (the same shader draws into several sizes)
 static void kd_floats(const char *what, int reg, uint64_t addr, uint64_t size, uint64_t cap) {
-    void *mb; uint64_t mo; const uint8_t *base;
+    void *mb; uint64_t mo; const uint8_t *base; uint8_t *st = NULL;
     if (!addr || !size) { fprintf(stderr, "[kd]   %s r%d 未绑\n", what, reg); return; }
     if (!mtl_addr(addr, 1, &mb, &mo) || !(base = [(__bridge id<MTLBuffer>)mb contents])) { fprintf(stderr, "[kd]   %s r%d addr=%#llx 不在内存池\n", what, reg, (unsigned long long)addr); return; }
-    uint64_t n = MIN(size, cap) / 4; const float *v = (const float *)(base + mo);
+    uint64_t nb = MIN(size, cap);
+    if ((st = malloc(nb ? (size_t)nb : 1)) && ub_read(addr, nb, st)) { base = st; mo = 0; }   // the staged copy is what the GPU reads
+    uint64_t n = nb / 4; const float *v = (const float *)(base + mo);
     fprintf(stderr, "[kd]   %s r%d addr=%#llx size=%llu%s\n", what, reg, (unsigned long long)addr, (unsigned long long)size, pend_hits(addr, size) ? "（本提交里还有待执行的写）" : "");
     for (uint64_t i = 0; i < n; i += 16) {
         char line[1024]; size_t o = 0;
         for (uint64_t k = i; k < n && k < i + 16 && o < sizeof line - 24; k++) o += snprintf(line + o, sizeof line - o, " %.6g", v[k]);
         fprintf(stderr, "[kd]     +%#06llx%s\n", (unsigned long long)(i * 4), line);
     }
+    free(st);
 }
 static int kd_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     static char key[24]; static int left = -1, every; static uint64_t last = ~0ull;
@@ -5543,9 +5649,10 @@ static void dispatch(const p_dispatch *dp) {
         void *ub, *sb, *db; uint64_t uo, so, dof;
         if (!mtl_addr(u->addr, 4, &ub, &uo) || !mtl_addr(a0->addr, 8, &sb, &so) || !mtl_addr(a1->addr, 8, &db, &dof)) { RED_ONCE(30, "内嵌计算核 %s 的缓冲没绑全", cs->builtin); return; }
         if (!cs->logged++) {
-            module_t *m = module_of((void *)dp->caller);
+            module_t *m = module_of((void *)dp->caller); uint32_t nelem = 0;
+            if (!ub_read(u->addr, 4, &nelem)) memcpy(&nelem, (const void *)u->addr, 4);   // the staged copy is what the GPU reads
             MLOG("内嵌计算核 %s 首次派发：调用点 %s+%#llx，线程组 %dx%dx%d，元素数（CPU 侧当前值）%u", cs->builtin, m ? m->name : "?",
-                 m ? (unsigned long long)(dp->caller - (uint64_t)m->base) : (unsigned long long)dp->caller, dp->x, dp->y, dp->z, *(uint32_t *)u->addr);
+                 m ? (unsigned long long)(dp->caller - (uint64_t)m->base) : (unsigned long long)dp->caller, dp->x, dp->y, dp->z, nelem);
         }
         rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
         id<MTLComputeCommandEncoder> ce = pg_compute();
