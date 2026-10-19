@@ -4982,8 +4982,15 @@ frz_plain:;
     }
     enc_r_scissor(en, sc);
     if (S.poly.cull == NVN_FACE_FRONT_AND_BACK) { PDS("Z %llu 绘制跳过：两面全剔", g_stat_pass); return; }
-    enc_r_cull(en, S.poly.cull == NVN_FACE_FRONT ? MTLCullModeFront : S.poly.cull == NVN_FACE_BACK ? MTLCullModeBack : MTLCullModeNone);
-    enc_r_winding(en, (S.poly.front == NVN_FRONT_FACE_CCW) != atomic_load_explicit(&g_origin_ll, memory_order_relaxed) ? MTLWindingCounterClockwise : MTLWindingClockwise);   // the y flip of lower-left mode reverses the winding
+    { static int nc = -1, cf = -1; if (nc < 0) { const char *e = getenv("DM_NVN_NOCULL"); nc = e && *e ? 1 : 0; cf = getenv("DM_NVN_CULLFLIP") ? 1 : 0; }
+      int force_none = 0, flip = 0;
+      if (nc && pr->sh[1]) force_none = !strncmp(pr->sh[1]->key, getenv("DM_NVN_NOCULL"), strlen(getenv("DM_NVN_NOCULL")));
+      if (cf && pr->sh[1]) flip = !strncmp(pr->sh[1]->key, getenv("DM_NVN_CULLFLIP"), strlen(getenv("DM_NVN_CULLFLIP")));
+      if (force_none) enc_r_cull(en, MTLCullModeNone);
+      else enc_r_cull(en, S.poly.cull == NVN_FACE_FRONT ? MTLCullModeFront : S.poly.cull == NVN_FACE_BACK ? MTLCullModeBack : MTLCullModeNone);
+      int ccw = (S.poly.front == NVN_FRONT_FACE_CCW) != atomic_load_explicit(&g_origin_ll, memory_order_relaxed);
+      if (flip) ccw = !ccw;
+      enc_r_winding(en, ccw ? MTLWindingCounterClockwise : MTLWindingClockwise); }   // the y flip of lower-left mode reverses the winding
     enc_r_fill(en, S.poly.mode == NVN_POLYGON_MODE_LINE ? MTLTriangleFillModeLines : MTLTriangleFillModeFill);
     if (S.poly.offset_en & 4) enc_r_depth_bias(en, S.po.units, S.po.factor, S.po.clamp); else enc_r_depth_bias(en, 0, 0, 0);
     enc_r_blend_color(en, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]);
@@ -5911,12 +5918,20 @@ void mtl_exec(const uint8_t *p) {
                     if (c < n) n = c;
                 }
                 size_t stride = d->stride > 0 ? (size_t)d->stride : (d->itype >= 0 ? 20u : 16u);
+                { static int dl2 = -1; if (dl2 < 0) dl2 = getenv("DM_NVN_DRAWLOG") != NULL;
+                  if (dl2) LOG("[drawind] 图元 %d 索引类型 %d max=%d 计数=%u stride=%zu 参数块=%#llx 计数块=%#llx", d->prim, d->itype, d->max, n, stride, (unsigned long long)d->indbuf, (unsigned long long)d->countbuf); }
                 g_exec_next = p + h.size;
                 for (uint32_t i = 0; i < n; i++) {
                     void *ib; uint64_t io;
                     if (!mtl_addr(d->indbuf + (uint64_t)i * stride, stride, &ib, &io)) break;
                     const uint32_t *q = (const uint32_t *)((const uint8_t *)[(__bridge id<MTLBuffer>)ib contents] + io);
-                    p_draw_idx di = {d->prim, d->itype, (int32_t)q[0], (int32_t)(d->itype >= 0 ? q[3] : 0), (int32_t)(d->itype >= 0 ? q[4] : q[3]), (int32_t)q[1], d->ibuf};
+                    { static int dl3 = -1; if (dl3 < 0) dl3 = getenv("DM_NVN_DRAWLOG") != NULL;
+                      if (dl3) LOG("[drawind]   #%u 参数 count=%u inst=%u first=%u bv=%u bi=%u（ibuf=%#llx）", i, q[0], q[1], q[2], d->itype >= 0 ? q[3] : 0, d->itype >= 0 ? q[4] : q[3], (unsigned long long)d->ibuf); }
+                    // The NVN indirect block carries a first-index offset into the index buffer on top of baseVertex: the draw record keeps the index buffer
+                    // address only, so fold firstIndex * index size into it (the evidence model's material parts start at 240 and 3504, and ignoring this made
+                    // two of the three parts draw the wrong triangles - the badge's ribbon/back plate looked torn).
+                    uint64_t ioff = (uint64_t)q[2] * (d->itype == 0 ? 1u : d->itype == 1 ? 2u : 4u);
+                    p_draw_idx di = {d->prim, d->itype, (int32_t)q[0], (int32_t)(d->itype >= 0 ? q[3] : 0), (int32_t)(d->itype >= 0 ? q[4] : q[3]), (int32_t)q[1], d->ibuf + ioff};
                     p_draw da = {d->prim, (int32_t)q[2], (int32_t)q[0], (int32_t)q[1], (int32_t)(d->itype >= 0 ? q[4] : q[3])};
                     if (d->itype >= 0) draw(NULL, &di); else draw(&da, NULL);
                 }
