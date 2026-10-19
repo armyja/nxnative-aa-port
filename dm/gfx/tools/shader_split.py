@@ -325,6 +325,64 @@ def unity_shaders(d, label, out, trees):
                 code = unityfs.subprogram(sp)[4]
                 out.extend((where, st, ctl, cd) for st, ctl, cd in unity_program(code, where, stages.get(k)))
 
+UNITYPY = os.environ.get('DM_UNITYPY') == '1' or os.environ.get('DM_UNITYPY') == 'on'
+
+CTL_MAGIC_UP = bytes.fromhex('34127698')   # NVN control section of a Switch subprogram (Unity 2022 layout)
+GFX_MAGIC_UP = bytes.fromhex('78563412')
+
+def unity_shaders_up(path, label, out):
+    """Shaders read with UnityPy (pip install UnityPy).
+
+    Unity 2022's player strips type trees and patches its common string table, so unityfs cannot decode the Shader
+    objects; UnityPy ships its own class definitions and can. The Switch subprograms of this game are not the
+    2019.3+ layout unity_program() expects: a subprogram holds a NVN control section (0x880 bytes, magic at its
+    start) followed by the code area, whose length sits at control+0x704. Verified with check(): stage from the
+    code's SPH word, same convention as the RE Engine .sdf path."""
+    import UnityPy
+    n_sh = n_prog = 0
+    for o in UnityPy.load(path).objects:
+        if o.type.name != 'Shader': continue
+        sh = o.read(); n_sh += 1
+        nm = getattr(sh, 'm_Name', None) or '?'
+        blob = bytes(sh.compressedBlob)
+        for i, plat in enumerate(sh.platforms):
+            offs, clen, dlen = sh.offsets[i], sh.compressedLengths[i], sh.decompressedLengths[i]
+            if not isinstance(offs, (list, tuple)): continue
+            segs = []
+            try:
+                import lz4.block
+                segs = [lz4.block.decompress(blob[a:a + b], uncompressed_size=c) for a, b, c in zip(offs, clen, dlen)]
+            except Exception as e:
+                print(f'[RED] {label}#{nm}#var{plat}: segments: {e!r}', flush=True); continue
+            if not segs: continue
+            s0 = segs[0]; cnt = struct.unpack_from('<I', s0, 0)[0]
+            if cnt > 100000: print(f'[RED] {label}#{nm}#var{plat}: {cnt} subprograms?', flush=True); continue
+            for k in range(cnt):
+                off, ln, sg = struct.unpack_from('<III', s0, 4 + 12 * k)
+                if sg >= len(segs): continue
+                sp = segs[sg][off:off + ln]
+                # One subprogram holds every stage of the variant: a NVN control section (magic at its start) followed by
+                # its code area, then the next stage's pair (AAI: two pairs, vertex and pixel).
+                c = sp.find(CTL_MAGIC_UP); part = 0
+                while c >= 0:
+                    g = sp.find(GFX_MAGIC_UP, c)
+                    if g < 0: break
+                    where = f'{label}#{nm}#var{plat}.{k}' + (f'.{part}' if part else '')
+                    ctl = sp[c:g]
+                    if len(ctl) < 0x708: print(f'[RED] {where}: control section {len(ctl)} bytes', flush=True); break
+                    cl = struct.unpack_from('<I', ctl, 0x704)[0]
+                    if cl <= 0 or g + cl > len(sp): print(f'[RED] {where}: code area {cl} bytes, {len(sp) - g} available', flush=True); break
+                    cd = sp[g:g + cl]
+                    st = SPH_STAGE.get((struct.unpack_from('<I', cd, 0x30)[0] >> 10) & 0xf) if cd[:4] == GFX_MAGIC_UP else None
+                    if st is None:
+                        print(f'[RED] {where}: unknown stage (code head {cd[:4].hex()})', flush=True)
+                    else:
+                        why = check(where, st, ctl, cd)
+                        if why: print(f'[RED] {where} {st}: {why}', flush=True)
+                        else: out.append((where, st, ctl, cd)); n_prog += 1
+                    c = sp.find(CTL_MAGIC_UP, g + cl); part += 1
+    return n_prog
+
 def sdf_shaders(d, label, out):
     """RE Engine .sdf (Switch): every compiled program is a 0x880-byte control section immediately followed by its code area, repeated
     (control magic +0x704 = code area length, verified for each one). The stage of a graphics program is SPH word 0 bits 10..13
@@ -416,8 +474,12 @@ def _scan_file1(args):
     if d[:4] == b'Yaz0': d = yaz0(d)
     if d[:8] == b'UnityFS\0' or (d[8:11] == b'\0\0\0' and __import__('unityfs').is_serialized(d)):
         import unityfs
-        try: unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
-        except unityfs.NoTree: return rel, {}, set(), 'defer'
+        if UNITYPY:
+            n = unity_shaders_up(path, '/' + rel, found)
+            if not n: return rel, {}, set(), {}
+        else:
+            try: unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
+            except unityfs.NoTree: return rel, {}, set(), 'defer'
     elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'SDF\0' and not (d[:4] == b'SARC' and b'Yaz0' in d): return rel, {}, set(), {}   # a SARC may hold Yaz0 members
     else: scan_blob(d, '/' + rel, found)
     return rel, uniq_keys(found), var_pairs(found), trees

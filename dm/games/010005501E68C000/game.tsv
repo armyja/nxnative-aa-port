@@ -45,3 +45,5 @@ device_api	55.15
 # reads them through unityfs.py. Built-ins (Resources/, globalgamemanagers) go to engine, the Addressables bundles to assets.
 shader_groups	/Resources/=engine /globalgamemanagers=engine /StreamingAssets/=assets
 shader_note	Ace Attorney Investigations Collection (Unity IL2CPP)
+# UnityPy (pip install UnityPy) reads the Shader objects of this game: its player strips type trees and patches the
+# common string table, so unityfs cannot decode them. Run shader_split.py with DM_UNITYPY=1.
