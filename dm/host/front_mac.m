@@ -96,26 +96,10 @@ static int g_win_sized;   // the window has been sized to the picture (the game 
 @interface DMWinDelegate : NSObject <NSWindowDelegate>
 @end
 @implementation DMWinDelegate
-- (NSSize)windowWillResize:(NSWindow *)w toSize:(NSSize)fsz {
-    if (w.styleMask & NSWindowStyleMaskFullScreen) return fsz;
-    NSRect c = [w contentRectForFrameRect:NSMakeRect(0, 0, fsz.width, fsz.height)];
-    if (c.size.width < 64 || c.size.height < 36) return fsz;
-    double cw = c.size.width, ch = c.size.height;
-    NSRect cur = w.frame;
-    double dw = fabs(fsz.width - cur.size.width), dh = fabs(fsz.height - cur.size.height);
-    double cwFit;
-    if (dh < 1e-6 && dw >= 1e-6) {
-        cwFit = cw;                     // left/right edge: only the width moved, so the width drives
-    } else if (dw < 1e-6 && dh >= 1e-6) {
-        cwFit = ch * 16.0 / 9.0;        // top/bottom edge: only the height moved, so the height drives
-    } else {
-        // corner: the opposite corner is the anchor, so take the smaller of the two candidates (the window stays
-        // inside the drag and the result is continuous - nothing to oscillate between)
-        cwFit = cw < ch * 16.0 / 9.0 ? cw : ch * 16.0 / 9.0;
-    }
-    NSRect f = [w frameRectForContentRect:NSMakeRect(0, 0, cwFit, cwFit * 9.0 / 16.0)];
-    return NSMakeSize(round(f.size.width), round(f.size.height));
-}
+// Note: the 16:9 constraint is AppKit's own contentAspectRatio (set below). Doing the arithmetic in
+// windowWillResize:toSize: made corner drags oscillate: the corrected (smaller) frame becomes the base of the next
+// proposal, so slow drags kept snapping between "grow" and "shrink". AppKit keeps the opposite corner anchored and
+// does not have that feedback loop.
 @end
 @interface DMScaleTarget : NSObject
 - (void)pick:(NSMenuItem *)it;
@@ -159,7 +143,8 @@ void front_run(void (*guest)(void)) {
                                                       backing:NSBackingStoreBuffered defer:NO];
         win.title = @DM_GAME_NAME;   // the game profile's name (game name label)
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;   // green button = real fullscreen (without this it only zooms)
-        { static DMWinDelegate *wd; wd = [DMWinDelegate new]; win.delegate = wd; }   // 16:9 while dragging (see windowWillResize)
+        win.contentAspectRatio = NSMakeSize(16, 9);   // AppKit's own aspect lock (see the note in DMWinDelegate)
+        { static DMWinDelegate *wd; wd = [DMWinDelegate new]; win.delegate = wd; }
         if (getenv("DM_WINDOW_PROBE")) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{   // probe: which points belong to the game view
             NSView *cv = win.contentView; NSView *theme = cv.superview; if (!theme) return;
             // Scan from the bottom-left corner inwards: tells us exactly how wide AppKit's resize border is here.
