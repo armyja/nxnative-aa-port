@@ -399,8 +399,8 @@ static uint64_t vmap_xlate(uint64_t addr) {
 // DM_VMAP_FLAT=1: for addresses inside a run of alias mappings, hand out one buffer covering the whole run instead of the 4 MB mapping that holds the
 // address. The aliased host range is contiguous and backed by the physical pages the engine writes, so the GPU can read across mapping boundaries --
 // which is what the deswizzle kernel needs for textures larger than one mapping (AA456's 3144x3144 pages).
-typedef struct { void *base; uint64_t len; void *buf; } flat_ent;
-static flat_ent g_flat[32]; static int g_nflat;
+typedef struct { void *base; uint64_t len; void *buf; uint64_t used; } flat_ent;
+static flat_ent g_flat[16]; static int g_nflat; static uint64_t g_flat_tick;   // 16 entries, least recently used replaced: the buffers only exist while an upload is in flight
 // A run can be dropped (the engine unmaps it) and its address space reused: forget any flat buffer that overlaps the dropped range. Buffers still in
 // flight are released after the current submission (defer_obj_release), so the GPU never reads a buffer whose memory has been repurposed.
 void mtl_vmap_flat_drop(void *lo, void *hi) {
@@ -425,12 +425,18 @@ static int mtl_vmap_flat(uint64_t addr, uint64_t need, void **buf, uint64_t *off
     if (hi > (uint64_t)(uintptr_t)st + len) hi = (uint64_t)(uintptr_t)st + len;
     if (lo < (uint64_t)(uintptr_t)st) lo = (uint64_t)(uintptr_t)st;
     st = (void *)(uintptr_t)lo; len = hi - lo;
-    for (int i = 0; i < g_nflat; i++) if (g_flat[i].base == st && g_flat[i].len == len) { *buf = g_flat[i].buf; *off = addr - (uint64_t)(uintptr_t)st; return 1; }
-    if (g_nflat >= 32) return 0;
+    for (int i = 0; i < g_nflat; i++) if (g_flat[i].base == st && g_flat[i].len == len) {
+        g_flat[i].used = ++g_flat_tick; *buf = g_flat[i].buf; *off = addr - (uint64_t)(uintptr_t)st; return 1; }
+    if (g_nflat == 16) {   // replace the least recently used entry (re-creating a buffer costs nothing: it wraps existing pages)
+        int lru = 0; for (int i = 1; i < g_nflat; i++) if (g_flat[i].used < g_flat[lru].used) lru = i;
+        id<MTLBuffer> ob = (__bridge id<MTLBuffer>)g_flat[lru].buf;
+        if (ob) { defer_obj_release(ob); CFRelease(g_flat[lru].buf); }
+        g_flat[lru] = g_flat[--g_nflat];
+    }
     id<MTLBuffer> b = [g_dev newBufferWithBytesNoCopy:st length:(NSUInteger)len options:MTLResourceStorageModeShared deallocator:nil];
     if (!b) { MLOG("【红】平铺缓冲建不出 %p+%#llx", st, (unsigned long long)len); return 0; }
     res_add(b);
-    g_flat[g_nflat].base = st; g_flat[g_nflat].len = len; g_flat[g_nflat].buf = (void *)CFBridgingRetain(b); g_nflat++;
+    g_flat[g_nflat].base = st; g_flat[g_nflat].len = len; g_flat[g_nflat].buf = (void *)CFBridgingRetain(b); g_flat[g_nflat].used = ++g_flat_tick; g_nflat++;
     MLOG("[vmap] 平铺缓冲 %p+%#llx（跨映射，供 GPU 连续读）", st, (unsigned long long)len);
     *buf = (__bridge void *)b; *off = addr - (uint64_t)(uintptr_t)st; return 1;
 }
