@@ -1311,7 +1311,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
                 if (sscanf(e, "%ux%u", &w, &h) == 2 && w && h) { g_watch_w = w; g_watch_h = h; woff = 1; }   // WxH: watch by size (the pool offset is shared)
                 else if (!strncmp(e, "big", 3)) { g_watch_w = g_watch_h = (unsigned)atoi(e + 3); if (!g_watch_w) g_watch_w = g_watch_h = 2048; woff = 1; }   // bigN: every page at least NxN
                 else woff = strtoull(e, NULL, 16); } }
-        if (woff) { void mtl_watch_tex(uint64_t); mtl_watch_tex(woff); }
+        if (woff) { void mtl_watch_tex(uint64_t); mtl_watch_tex(woff == 1 ? 0 : woff); }   // 1 = enabled with the WxH / bigN selector, 0 tells the watcher to use it
     }
     gfx_enter();
     uint64_t t0 = now_ns();
@@ -1489,6 +1489,22 @@ int nvn_vmap_host(const void *p, const void **host) {
             *host = e->phys + ((const uint8_t *)p - e->vaddr); ok = 1; break; } }
     pthread_mutex_unlock(&g_vmap_mu);
     return ok;
+}
+// Compare a virtual range against the physical pages it is aliased to: a mismatch means the alias translation (or its offset) is wrong, which would
+// make the host read different bytes than the engine wrote. Used on AA456's 3144x3144 sprite page, whose upper part renders as opaque black.
+void nvn_vmap_compare(const void *p, uint64_t n) {
+    const uint8_t *q = p; uint64_t done = 0, bad = 0, first = ~0ull;
+    pthread_mutex_lock(&g_vmap_mu);
+    for (int i = 0; i < g_nvmap && done < n; i++) {
+        vmap_ent *e = &g_vmap[i];
+        if (q + done < e->vaddr || q + done >= e->vaddr + e->size) continue;
+        uint64_t off = (uint64_t)((q + done) - e->vaddr), len = e->size - off; if (len > n - done) len = n - done;
+        for (uint64_t k = 0; k < len; k++) if (e->vaddr[off + k] != e->phys[off + k]) { bad++; if (first == ~0ull) first = done + k; }
+        done += len; q = p;
+    }
+    pthread_mutex_unlock(&g_vmap_mu);
+    LOG("[vmap] 比对 %p 起 %llu 字节：覆盖 %llu 字节，虚拟与物理不同 %llu 字节%s%llu", p, (unsigned long long)n, (unsigned long long)done,
+        (unsigned long long)bad, bad ? "，首个不同偏移 " : "", (unsigned long long)(bad ? first : 0));
 }
 void nvn_vmap_probe(const void *p, uint64_t n) {
     int found = 0;

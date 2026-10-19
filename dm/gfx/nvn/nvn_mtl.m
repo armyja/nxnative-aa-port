@@ -1369,6 +1369,15 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
                 if (!logged++) MLOG("[texredo] 每 %d 帧重传%s（首例 ser=%llu %ux%u）", every, rmin ? "所有大贴图" : "该尺寸贴图", (unsigned long long)t->serial, t->d.width, t->d.height); }
         }
     }
+    {   // Diagnostic DM_TEX_HALF_H=WxH: halve that texture's height before it is created. Probe for "the engine's logical atlas is half as tall
+        // as the storage suggests" (AA456's 3144x3144 sprite page: art fills the top ~51%, and the parts whose v lands above it render black)
+        static int hh = -1; static uint32_t hw, hht;
+        if (hh < 0) { hh = 0; const char *e = getenv("DM_TEX_HALF_H"); if (e && sscanf(e, "%ux%u", &hw, &hht) == 2 && hw && hht) hh = 1; }
+        if (hh && t->d.width == hw && t->d.height == hht) {
+            static uint64_t once; t->d.height = hht / 2;
+            if (!once++) MLOG("[texhalf] %ux%u 的贴图高度按 %u 创建（诊断）", hw, hht, hht / 2);
+        }
+    }
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(70, "贴图对象已失效（magic %#x，首例 ser=%llu）：不建 MTLTexture", t->magic, (unsigned long long)t->serial); return nil; }
     int packaged = (t->has_layout || tex_cpu_written(t->serial)) && t->mem;
     // Virtual-pool textures are filled by the engine through the aliased physical pages (compressed formats cannot be zero-copy linear textures), so
@@ -1397,7 +1406,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
             { uint64_t nzall = 0; for (uint64_t q = 0; q < t->L.size && q < (24u << 20); q++) nzall += t->mem[q] != 0;
               MLOG("[vpool上传] ser=%llu %ux%u 格式=%#x 存储=%llu 非零(前8MB)=%llu 非零(前24MB)=%llu", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format,
                    (unsigned long long)t->L.size, (unsigned long long)nz, (unsigned long long)nzall); }
-            { void nvn_vmap_probe(const void *, uint64_t); nvn_vmap_probe(t->mem, t->L.size);
+            { void nvn_vmap_probe(const void *, uint64_t); void nvn_vmap_compare(const void *, uint64_t); nvn_vmap_compare(t->mem, t->L.size); nvn_vmap_probe(t->mem, t->L.size);
               if (t->L.size > 4096) nvn_vmap_probe(t->mem + t->L.size - 4096, 4096);   // tail: is the whole storage mapped? (a hole reads as zeros)
               if (t->mem) nvn_vmap_probe(t->mem + (t->L.size / 2), t->L.size / 2); }
             res_add(nt); serial_put(t->serial, nt); g_pkg_uploads++; return nt; }
