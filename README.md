@@ -56,6 +56,28 @@ Both trilogies run on the Mac host (`dm/host/dmhost`) and in the iOS app:
 | Phoenix Wright: Ace Attorney Trilogy (逆转裁判 123) | 0100CB000A142000 | base game + update 1.1.0 | Save/load fixed in this fork; keyboard, controller and mouse (as touch) input |
 | Apollo Justice: Ace Attorney Trilogy (逆转裁判 456) | 010020D01B890000 | base game + update 1.0.0 | Court Record with the 3D evidence viewer, save/load, 30 fps; renders natively at 1920×1080, `DM_GAME_RES=2560x1440` raises the internal resolution |
 
+How to run them on a Mac (`B` is the build directory the extraction step wrote for that title, e.g.
+`~/projects/aa123/0100CB000A142000_build` — the layouts and every variable are listed in
+[FORK-NOTES.md](FORK-NOTES.md)):
+
+```bash
+B=~/projects/aa123/0100CB000A142000_build
+make -C dm/host GAME=0100CB000A142000 dmhost
+DM_WINDOW=1 DM_AUDIO=1 DM_MSL_DIR="$B/shader_cache" \
+DM_ROOT="$B" DM_ROMFS="$B/extract/v196608/RomFS" DM_FONT_DIR="$B/font" \
+DM_SAVE="$B/run/save" DM_TEMP="$B/run/temp" \
+dm/host/dmhost "$B/patched_v196608"
+```
+
+```bash
+B=~/projects/aa456/010020D01B890000_build
+ROMFS=/Volumes/Untitled/aa456/build/RomFS     # wherever the 456 RomFS lives
+make -C dm/host GAME=010020D01B890000 dmhost
+DM_WINDOW=1 DM_AUDIO=1 DM_MSL_DIR="$B/work/cache" DM_ROMFS="$ROMFS" \
+DM_SAVE="$B/run/save" DM_TEMP="$B/run/temp" \
+dm/host/dmhost "$B/patched_v65536"
+```
+
 | | |
 |:---:|:---:|
 | ![Ace Attorney 123 — court lobby](docs/images/aa123_lobby.jpg)<br>逆转裁判 123 — court lobby | ![Ace Attorney 123 — save/load](docs/images/aa123_load.jpg)<br>逆转裁判 123 — save/load |
@@ -180,6 +202,27 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license; see [dm/th
 |---|---|---|---|
 | 逆转裁判 123 成步堂精选集 | 0100CB000A142000 | 本体 + 1.1.0 更新 | 本分支修好了存档/读档；键盘、手柄、鼠标（当触摸）都可用 |
 | 逆转裁判 456 王泥喜精选集 | 010020D01B890000 | 本体 + 1.0.0 更新 | 法庭记录（含 3D 证物查看）、存档读档、30 fps；原生 1920×1080 渲染，`DM_GAME_RES=2560x1440` 可提高内部渲染分辨率 |
+
+在 Mac 上运行（`B` 就是解包工具为这个游戏生成的构建目录，例如 `~/projects/aa123/0100CB000A142000_build`；
+目录结构和每个环境变量在 [FORK-NOTES.md](FORK-NOTES.md) 里都有说明）：
+
+```bash
+B=~/projects/aa123/0100CB000A142000_build
+make -C dm/host GAME=0100CB000A142000 dmhost
+DM_WINDOW=1 DM_AUDIO=1 DM_MSL_DIR="$B/shader_cache" \
+DM_ROOT="$B" DM_ROMFS="$B/extract/v196608/RomFS" DM_FONT_DIR="$B/font" \
+DM_SAVE="$B/run/save" DM_TEMP="$B/run/temp" \
+dm/host/dmhost "$B/patched_v196608"
+```
+
+```bash
+B=~/projects/aa456/010020D01B890000_build
+ROMFS=/Volumes/Untitled/aa456/build/RomFS     # 456 的 RomFS 解包位置
+make -C dm/host GAME=010020D01B890000 dmhost
+DM_WINDOW=1 DM_AUDIO=1 DM_MSL_DIR="$B/work/cache" DM_ROMFS="$ROMFS" \
+DM_SAVE="$B/run/save" DM_TEMP="$B/run/temp" \
+dm/host/dmhost "$B/patched_v65536"
+```
 
 | | |
 |:---:|:---:|

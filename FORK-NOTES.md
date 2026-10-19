@@ -38,37 +38,79 @@ provide or explain how to obtain either. Not affiliated with Nintendo or any gam
    dragging, mouse clicks become touch points (`nn::hid` touch screen), keyboard + controller input, one-click
    fullscreen.
 
+## Where the files go
+
+Every command below uses one variable, `B`, the **build directory of one title**: the folder where the
+extraction step put the game and where the host keeps its shader cache, saves and temp files. It is created
+by `dm/tools/nx_extract` (or by `scripts/build_ipa_from_nsp.py`) and, in the layout used while developing
+this fork, looks like this:
+
+```
+~/projects/aa123/0100CB000A142000_build/      # Ace Attorney 123  (B for the commands below)
+  extract/v196608/ExeFS/main                  # the untouched guest modules
+  extract/v196608/RomFS/                      # the game's RomFS
+  patched_v196608/                            # rewriter output (patched copies, originals untouched)
+  run/save/  run/temp/                        # save data (systemdata) and scratch space
+  font/                                       # dumped shared fonts (only 123 needs this)
+
+~/projects/aa456/010020D01B890000_build/      # Apollo Justice 456
+  extract/v65536/                             # (our 456 build keeps the RomFS on an external volume)
+  patched_v65536/
+  work/cache/                                 # MSL/shader cache produced on the first run
+  run/save/  run/temp/
+```
+
+Nothing in `patched_*` is ever written back to `extract/`; the rewriter only reads the original modules.
+
 ## Building and running (Ace Attorney 123)
 
 ```bash
-# host
+B=~/projects/aa123/0100CB000A142000_build      # <- the folder described above
+
 make -C dm/host GAME=0100CB000A142000 dmhost
 
 # rewrite the modules (patches only; never touches the original files)
 ~/projects/nxnative-venv/bin/python dm/tools/patch_nso.py \
-  <build>/extract/v196608/ExeFS/main <build>/patched_v196608 main
+  "$B/extract/v196608/ExeFS/main" "$B/patched_v196608" main
 
-# run
 DM_WINDOW=1 DM_AUDIO=1 DM_KEEP_FOCUS=1 DM_NVN_CBDEFER=1 \
-DM_MSL_DIR=<shader cache> \
-DM_ROOT=<build> DM_ROMFS=<build>/extract/v196608/RomFS \
-DM_SAVE=<build>/run/save DM_TEMP=<build>/run/temp DM_FONT_DIR=<build>/font \
-./dm/host/dmhost <build>/patched_v196608
+DM_MSL_DIR="$B/shader_cache" \
+DM_ROOT="$B" DM_ROMFS="$B/extract/v196608/RomFS" \
+DM_SAVE="$B/run/save" DM_TEMP="$B/run/temp" DM_FONT_DIR="$B/font" \
+./dm/host/dmhost "$B/patched_v196608"
 ```
 
 ## Running Ace Attorney 456
 
 ```bash
+B=~/projects/aa456/010020D01B890000_build      # <- the folder described above
+ROMFS=/Volumes/Untitled/aa456/build/RomFS      # wherever the 456 RomFS was extracted
+
 make -C dm/host GAME=010020D01B890000 dmhost
 
+~/projects/nxnative-venv/bin/python dm/tools/patch_nso.py \
+  "$B/extract/v65536/ExeFS/main" "$B/patched_v65536" main
+
 DM_WINDOW=1 DM_AUDIO=1 \
-DM_MSL_DIR=<build>/work/cache DM_ROMFS=<RomFS> \
-DM_SAVE=<build>/run/save DM_TEMP=<build>/run/temp \
-dm/host/dmhost <build>/patched_v65536
+DM_MSL_DIR="$B/work/cache" DM_ROMFS="$ROMFS" \
+DM_SAVE="$B/run/save" DM_TEMP="$B/run/temp" \
+dm/host/dmhost "$B/patched_v65536"
 ```
 
-The guest modules only need the stock rewriter output (`patch_nso.py ... <build>/patched_v65536 main`); the
-resolution override and the touch screen are implemented on the host side, not in the rewriter.
+The guest modules only need the stock rewriter output (`patch_nso.py`); the resolution override
+(`DM_GAME_RES`), the touch screen and the window handling are implemented on the host side, not in the rewriter.
+
+What the variables mean:
+
+| Variable | Points to |
+|---|---|
+| `DM_MSL_DIR` | shader cache: 123 uses `$B/shader_cache`, 456 `$B/work/cache` (created on the first run) |
+| `DM_ROOT` / `DM_ROMFS` | the extracted game root and its RomFS |
+| `DM_SAVE` / `DM_TEMP` | save data (`systemdata`) and scratch space, both inside the build directory |
+| `DM_FONT_DIR` | dumped shared fonts (123 only; without it the dialogue text is invisible) |
+| `DM_WINDOW=1 DM_AUDIO=1` | open a window and enable audio (`DM_AUDIO` off = silent sink) |
+| `DM_KEEP_FOCUS=1` | keep the guest "focused" while the window is not key (automation; drop it when playing) |
+| `DM_NVN_CBDEFER=1` | 123's command-buffer deferral (leave it on for 123) |
 
 See the upstream `README.md` and `docs/` for the general workflow (survey, profiles, shader pipeline).
 
