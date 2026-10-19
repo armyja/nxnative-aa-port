@@ -1487,6 +1487,7 @@ int nvn_vmap_host(const void *p, const void **host) {
     return ok;
 }
 void nvn_vmap_probe(const void *p, uint64_t n) {
+    int found = 0;
     pthread_mutex_lock(&g_vmap_mu);
     for (int i = 0; i < g_nvmap; i++) {
         vmap_ent *e = &g_vmap[i];
@@ -1498,10 +1499,12 @@ void nvn_vmap_probe(const void *p, uint64_t n) {
                 nzv += a; nzp += b;
             }
             LOG("[vmap] 探针 %p：映射 #%d 虚拟 %p 物理 %p poff=%#llx size=%#llx；虚拟非零页 %llu、物理非零页 %llu（抽样）", p, i, (void *)e->vaddr, (void *)e->phys, (unsigned long long)e->poff, (unsigned long long)e->size, (unsigned long long)nzv, (unsigned long long)nzp);
+            found = 1;
             break;
         }
     }
     pthread_mutex_unlock(&g_vmap_mu);
+    if (!found) LOG("[vmap] 探针 %p（%llu 字节）：不在任何映射里 —— 该段未映射，读出来全是零", p, (unsigned long long)n);
 }
 void nvn_vmap_refresh(void) {
     static int logged, cnt; uint64_t nz = 0, nzv = 0, tot = 0;

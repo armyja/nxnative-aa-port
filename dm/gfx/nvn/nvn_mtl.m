@@ -1394,7 +1394,12 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     if (!packaged && vpool && !have) {   // one-shot upload from the aliased guest storage
         uint64_t st; id<MTLTexture> nt = pkg_upload(t, &st);
         if (nt) { uint64_t nz = 0; for (uint64_t q = 0; q < t->L.size && q < (8u << 20); q++) nz += t->mem[q] != 0;
-            MLOG("[vpool上传] ser=%llu %ux%u 格式=%#x 存储=%llu 非零(前8MB)=%llu", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, (unsigned long long)t->L.size, (unsigned long long)nz);
+            { uint64_t nzall = 0; for (uint64_t q = 0; q < t->L.size && q < (24u << 20); q++) nzall += t->mem[q] != 0;
+              MLOG("[vpool上传] ser=%llu %ux%u 格式=%#x 存储=%llu 非零(前8MB)=%llu 非零(前24MB)=%llu", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format,
+                   (unsigned long long)t->L.size, (unsigned long long)nz, (unsigned long long)nzall); }
+            { void nvn_vmap_probe(const void *, uint64_t); nvn_vmap_probe(t->mem, t->L.size);
+              if (t->L.size > 4096) nvn_vmap_probe(t->mem + t->L.size - 4096, 4096);   // tail: is the whole storage mapped? (a hole reads as zeros)
+              if (t->mem) nvn_vmap_probe(t->mem + (t->L.size / 2), t->L.size / 2); }
             res_add(nt); serial_put(t->serial, nt); g_pkg_uploads++; return nt; }
     }
     if (packaged) {
@@ -5006,14 +5011,19 @@ frz_plain:;
                       if (ser) { int dup = 0; for (int q = 0; q < g_smp_n; q++) if (g_smp[q] == ser) dup = 1;
                           if (!dup && g_smp_n < 128) g_smp[g_smp_n++] = ser; }
                       int bv = dw ? 0 : (di ? di->base_vertex : 0), cnt = dw ? dw->count : (di ? di->count : 0);
-                      fprintf(g_vtbl, "%llu %llu %d %d %llu %llu %d %llu", (unsigned long long)fr, (unsigned long long)g_stat_pass, bv, cnt,
+                      fprintf(g_vtbl, "%llu %llu %d %d %llu %llu %d %llu %d %#llx %#llx %#llx", (unsigned long long)fr, (unsigned long long)g_stat_pass, bv, cnt,
                           (unsigned long long)S.vbuf[0].address, (unsigned long long)S.stream[0].stride, (int)(dw ? dw->prim : di->prim),
-                          (unsigned long long)ser);
-                      const p_bind_buf *u = &S.ubo[0][1]; void *mb; uint64_t mo;
-                      if (u->addr && u->size == 288 && mtl_addr(u->addr, 288, &mb, &mo)) {
-                          const float *f = (const float *)[(__bridge id<MTLBuffer>)mb contents] + mo / 4;
-                          for (int q = 0; q < 72; q++) fprintf(g_vtbl, " %g", f[q]);
-                      } else fprintf(g_vtbl, " -");
+                          (unsigned long long)ser, (int)S.color.blend_en,
+                          (unsigned long long)*(uint64_t *)&S.blend[0], (unsigned long long)*(uint64_t *)&S.blend[1], (unsigned long long)*(uint64_t *)&S.blend[2]);
+                      for (int stg = 0; stg < 2; stg++) for (int rg = 0; rg < 4; rg++) {   // placement / atlas offset uniforms of both stages
+                          const p_bind_buf *u = &S.ubo[stg][rg]; void *mb; uint64_t mo;
+                          if (u->addr && u->size && mtl_addr(u->addr, u->size, &mb, &mo)) {
+                              const float *f = (const float *)[(__bridge id<MTLBuffer>)mb contents] + mo / 4;
+                              int n = (int)(u->size / 4); if (n > 16) n = 16;
+                              fprintf(g_vtbl, " %d", n);
+                              for (int q = 0; q < n; q++) fprintf(g_vtbl, " %g", f[q]);
+                          } else fprintf(g_vtbl, " 0");
+                      }
                       fputc('\n', g_vtbl);
                   }
               }
@@ -5405,7 +5415,11 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     enc_b_end(b); [cb commit]; [cb waitUntilCompleted];
     for (int z = 0; z < nz; z++) for (size_t y = 0; y < hb; y++) memcpy(dst + z * img + y * row, (uint8_t *)buf.contents + z * wb * hb + y * wb, wb);
 }
+static int copylog(void);
 static void copy_b2t(const p_copy_b2t *c) {
+    if (copylog()) { static int n; if (n++ < 4000 && c->tex)
+        LOG("[copy] b2t 缓冲 %#llx → 目标 %llu(%ux%u) 区域 %dx%d 到 %d,%d", (unsigned long long)c->src, (unsigned long long)c->tex->serial,
+            c->tex->d.width, c->tex->d.height, c->r.width, c->r.height, c->r.xoffset, c->r.yoffset); }
     if (c->tex) zskip_del(c->tex->serial);
     id<MTLTexture> t = tex_mtl(c->tex);
     PDS("C ser=%llu", c->tex->serial);
@@ -5560,7 +5574,11 @@ static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsign
     return 1;
 }
 // GPU: texture -> texture (previously mislisted as a no-op, 3 times per frame on the character select page). Same size, not mirrored, same format -> blit layer by layer; the other semantics (scaling with filtering, mirroring, format change) cannot be expressed by blit: report a failure, to be implemented
+static int copylog(void) { static int v = -1; if (v < 0) v = getenv("DM_NVN_COPYLOG") != NULL; return v; }
 static void copy_t2t(const p_copy_t2t *c) {
+    if (copylog()) { static int n; if (n++ < 4000 && c->src && c->dst)
+        LOG("[copy] t2t 源 %llu(%ux%u) → 目标 %llu(%ux%u) 区域 %dx%d 自 %d,%d 到 %d,%d", (unsigned long long)c->src->serial, c->src->d.width, c->src->d.height,
+            (unsigned long long)c->dst->serial, c->dst->d.width, c->dst->d.height, c->sr.width, c->sr.height, c->sr.xoffset, c->sr.yoffset, c->dr.xoffset, c->dr.yoffset); }
     if (c->src) xv_check(c->src->serial, c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, "贴图拷贝源");
     rp_flush();   // Land the pending pure-clear render pass first (zero-source candidates only enter the set when the render pass ends); the blit() below would end the render pass anyway
     if (c->dst) zskip_del(c->dst->serial);
