@@ -299,8 +299,12 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
     errno = ENOENT; return 0;
 }
 static int host_path(const char *p, char *out, size_t n, int *ro) { return host_path_ex(p, out, n, ro, 0); }
-// 给别的子系统（.NET 托管侧的 stat/open 钩子）用：把 guest 设备路径翻成宿主路径
-int dm_fs_guest_path(const char *p, char *out, size_t n, int *ro) { return host_path(p, out, n, ro); }
+// 给别的子系统（.NET 托管侧的 stat/open 钩子）用：把 guest 设备路径翻成宿主路径。
+// 目录名索引没有自己的锁（见 dir_index_get 的注释），调用方必须持有 g_path_lock——托管线程也会调到这里。
+int dm_fs_guest_path(const char *p, char *out, size_t n, int *ro) {
+    pthread_mutex_t *path_guard __attribute__((cleanup(path_unlock))) = &g_path_lock; pthread_mutex_lock(path_guard);
+    return host_path(p, out, n, ro);
+}
 static int set_guest_name(const char *hp, const char *path) {
     const char *end = path + strlen(path); while (end > path && end[-1] == '/') end--;
     const char *start = end; while (start > path && start[-1] != '/' && start[-1] != ':') start--;
@@ -861,6 +865,20 @@ HLE_FORCE("_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE", "fsp-srv
     closedir(d); *out = n; return RES_OK;
 }
 // Whether save data exists: the host's save directory is created at mount time, so from the game's point of view it always exists (EnsureSaveData always succeeds too)
+// 带 ApplicationId 的重载（Unity 的标题用这个）：不接管的话 SDK 内部会去初始化 sm/sf 的 IPC 服务发现，
+// 宿主没有那套服务，直接 nn::diag 中止（存档自动保存一触发就挂）。存档目录在挂载时已建好，一律回答「存在」。
+HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE", "fsp-srv；存档存在（按应用 ID 的重载）", unsigned, h_fs_SaveExistsApp, uint64_t appId, const void *uid) {
+    (void)appId; (void)uid; return 1;
+}
+// 只读挂载：和可写挂载一样落到 DM_SAVE，只是标成只读
+HLE_FORCE("_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE", "fsp-srv；只读存档挂载", Result, h_fs_MountSaveRO, const char *name, uint64_t appId, const void *uid) {
+    (void)appId; (void)uid;
+    const char *d = getenv("DM_SAVE");
+    if (!d) return RES_OK;
+    char dd[1024]; strlcpy(dd, d, sizeof dd); size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;
+    if (g_flag.fs) LOG("fs MountSaveDataReadOnly(name=\"%s\")", name ? name : "(null)");
+    return mount_ex(name, dd, 1, 0);
+}
 HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingERKNS_7account3UidE", "fsp-srv；按存档目录里有没有文件如实回答", unsigned, h_fs_SaveExists, const void *uid) {
     (void)uid;
     // Report whether the save actually holds anything: claiming "exists" on an empty directory made the game take the

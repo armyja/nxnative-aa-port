@@ -95,12 +95,24 @@ void guest_clock_freeze(int on) { guest_clock_freeze_for(0, on); }
 // Entropy source: true random by default (arc4random); with DM_DETCLOCK on it becomes a fixed-seed splitmix64 stream (so that replay pictures are byte-for-byte comparable, the camp blue fire particles differed between two passes).
 // The two outlets (libc getentropy, svc GetInfo RandomEntropy) share one stream; the call count is reported in the log (first call and every 1000 calls)
 static _Atomic uint64_t g_detrng = 0x5357444554524e47ull; static _Atomic uint64_t g_detrng_n;
+int dm_detclock_on(void) { return detclock_cfg(); }   // 给 hle_il2cpp.c 的随机数补丁用
 uint64_t dm_entropy64(void) {
     if (!detclock_cfg()) return ((uint64_t)arc4random() << 32) | arc4random();
     uint64_t z = atomic_fetch_add(&g_detrng, 0x9E3779B97F4A7C15ull) + 0x9E3779B97F4A7C15ull;
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull; z = (z ^ (z >> 27)) * 0x94D049BB133111EBull; z ^= z >> 31;
     uint64_t n = atomic_fetch_add(&g_detrng_n, 1) + 1; if (n == 1 || n % 1000 == 0) LOG("DM_DETCLOCK：确定熵第 %llu 次", (unsigned long long)n);
     return z;
+}
+// nn::crypto / nn::os random bytes: on hardware these open a csrng session (IPC). The host has no such service, the
+// SDK's crypto helper fails, and .NET's RNGCryptoServiceProvider aborts the process (SaveEncrypt -> AES -> GenerateIV
+// -> Break, seen the first time the game writes its save data). Answer from the host's secure RNG, same stream as getentropy.
+HLE_FORCE("_ZN2nn6crypto36GenerateCryptographicallyRandomBytesEPvm", "随机数：宿主 arc4random", void, h_crypto_random, void *p, size_t n) {
+    if (!detclock_cfg()) { arc4random_buf(p, n); return; }
+    for (size_t i = 0; i < n; i += 8) { uint64_t v = dm_entropy64(); memcpy((uint8_t *)p + i, &v, n - i < 8 ? n - i : 8); }
+}
+HLE_FORCE("_ZN2nn2os19GenerateRandomBytesEPvm", "随机数：宿主 arc4random", void, h_os_random, void *p, size_t n) {
+    if (!detclock_cfg()) { arc4random_buf(p, n); return; }
+    for (size_t i = 0; i < n; i += 8) { uint64_t v = dm_entropy64(); memcpy((uint8_t *)p + i, &v, n - i < 8 ? n - i : 8); }
 }
 HLE("getentropy", int, g_getentropy, void *p, size_t n) {
     if (!detclock_cfg()) { arc4random_buf(p, n); return 0; }

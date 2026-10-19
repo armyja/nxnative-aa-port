@@ -157,6 +157,24 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         fprintf(stderr, "[dm] fp=%#llx  sp 下方 0x100 字节:", (unsigned long long)uc->uc_mcontext->__ss.__fp);
         for (int i = -32; i < 0 && sp && !(sp & 7); i++) fprintf(stderr, "%s%llx", (i + 32) % 4 ? " " : "\n[dm]   ", (unsigned long long)((uint64_t *)sp)[i]);
         fputc('\n', stderr); }
+    if (getenv("DM_CRASH_VT")) {   // 崩溃时把 [x19+0x1c8] 这个对象和它的虚表槽 +0x20（刚才调用返回 0 的那个函数）解出来
+        uint64_t x19 = uc->uc_mcontext->__ss.__x[19], o = 0, vt = 0, fn = 0; vm_size_t g = 0;
+        if (!vm_read_overwrite(mach_task_self(), (vm_address_t)(x19 + 0x1c8), 8, (vm_address_t)&o, &g) && g == 8 && o > 0x10000) {
+            uint64_t k = 0;
+            if (!vm_read_overwrite(mach_task_self(), (vm_address_t)o, 8, (vm_address_t)&k, &g) && g == 8) vt = k;
+            // 顺着 [obj] → 虚表 +0x20 的转发链最多走三层（分配器是一层套一层的委托）
+            for (int lvl = 0; lvl < 3 && o > 0x10000; lvl++) {
+                uint64_t k = 0; fn = 0;
+                if (!vm_read_overwrite(mach_task_self(), (vm_address_t)o, 8, (vm_address_t)&k, &g) || g != 8) break;
+                vt = k;
+                if (!vm_read_overwrite(mach_task_self(), (vm_address_t)(vt + 0x20), 8, (vm_address_t)&fn, &g) || g != 8) break;
+                module_t *m = module_of((void *)fn), *mo = module_of((void *)o);
+                fprintf(stderr, "[dm] 第%d层 分配器对象 %#llx（%s+%#llx）虚表+0x20 → %s+%#llx\n", lvl,
+                        (unsigned long long)o, mo ? mo->name : "?", mo ? (unsigned long long)(o - (uint64_t)mo->base) : 0,
+                        m ? m->name : "?", m ? (unsigned long long)(fn - (uint64_t)m->base) : fn);
+                if (!vm_read_overwrite(mach_task_self(), (vm_address_t)(o + 0x10), 8, (vm_address_t)&o, &g) || g != 8) break;
+            }
+        } }
     if (getenv("DM_CRASH_OBJ")) {   // IL2CPP: 对象 +0 是 Il2CppClass*，类名在 +0x10、命名空间在 +0x18（崩溃调查用）
         uint64_t o = uc->uc_mcontext->__ss.__x[19];
         if (o > 0x10000000ull) {
