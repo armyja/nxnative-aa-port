@@ -1540,6 +1540,7 @@ static uint64_t g_stat_draw, g_stat_pass, g_bw_load, g_bw_store, g_pass_full_rw,
 // DM_VBUF_DUMP=<fragment key prefix>:<path>: the vertex stream of the last matching draw, dumped at frame end (before that the submit has not
 // run the GPU-side copies that fill it, which is why DM_NVN_KEYDUMP shows zeros for such buffers)
 static uint64_t g_vd_addr, g_vd_size; static char g_vd_path[512]; static int g_vd_on;
+static FILE *g_vtbl; static long g_vt_frame = -1;   // DM_VBUF_DUMP per-draw table (frame, pass, baseVertex, page, uniform r1)
 static int g_kd_force;   // the draw DM_NVN_KEYDUMP matched: force the per-binding records on (see kd_draw)
 static int passdump(void) {
     if (g_kd_force) return 1;
@@ -4986,9 +4987,32 @@ frz_plain:;
       {   // DM_VBUF_DUMP=<fragment key prefix>:<path>: remember the vertex stream of the last matching draw, dumped at frame end
           static int vk = -1; static char key[24];
           if (vk < 0) { vk = 0; const char *e = getenv("DM_VBUF_DUMP"); const char *c = e ? strchr(e, ':') : NULL;
-              if (c) { size_t n = (size_t)(c - e); if (n > 23) n = 23; memcpy(key, e, n); key[n] = 0; snprintf(g_vd_path, sizeof g_vd_path, "%s", c + 1); vk = 1; } }
-          if (vk && pr->sh[1] && !strncmp(pr->sh[1]->key, key, strlen(key)) && S.vbuf[0].address && S.stream[0].stride)
-              { g_vd_addr = S.vbuf[0].address; g_vd_size = S.vbuf[0].size; g_vd_on = 1; }
+              if (c) { size_t n = (size_t)(c - e); if (n > 23) n = 23; memcpy(key, e, n); key[n] = 0; const char *c2 = strchr(c + 1, ':');
+                  if (c2) { snprintf(g_vd_path, sizeof g_vd_path, "%.*s", (int)(c2 - (c + 1)), c + 1); g_vt_frame = atol(c2 + 1); }
+                  else snprintf(g_vd_path, sizeof g_vd_path, "%s", c + 1); vk = 1; } }
+          if (vk && pr->sh[1] && !strncmp(pr->sh[1]->key, key, strlen(key)) && S.vbuf[0].address && S.stream[0].stride) {
+              g_vd_addr = S.vbuf[0].address; g_vd_size = S.vbuf[0].size; g_vd_on = 1;
+              // Per-draw table: the frame-end dump of the vertex buffer is only usable together with each draw's base vertex, page and
+              // placement matrix (the vertices are local to the sprite, the screen position comes from uniform r1)
+              uint64_t fr = atomic_load(&g_cur_frame);
+              if (g_vt_frame < 0 || (long)fr == g_vt_frame) {
+                  if (!g_vtbl) { char tp[600]; snprintf(tp, sizeof tp, "%s.tbl", g_vd_path); g_vtbl = fopen(tp, "w"); if (!g_vtbl) vk = 0; }
+                  if (g_vtbl) {
+                      uint64_t hh = S.tex[1][0]; int tid = (int)(hh & 0xfffff);
+                      uint64_t ser = (tid > 0 && tid < (1 << 20)) ? atomic_load_explicit(&g_tser[tid], memory_order_relaxed) : 0;
+                      int bv = dw ? 0 : (di ? di->base_vertex : 0), cnt = dw ? dw->count : (di ? di->count : 0);
+                      fprintf(g_vtbl, "%llu %llu %d %d %llu %llu %d %llu", (unsigned long long)fr, (unsigned long long)g_stat_pass, bv, cnt,
+                          (unsigned long long)S.vbuf[0].address, (unsigned long long)S.stream[0].stride, (int)(dw ? dw->prim : di->prim),
+                          (unsigned long long)ser);
+                      const p_bind_buf *u = &S.ubo[0][1]; void *mb; uint64_t mo;
+                      if (u->addr && u->size == 288 && mtl_addr(u->addr, 288, &mb, &mo)) {
+                          const float *f = (const float *)[(__bridge id<MTLBuffer>)mb contents] + mo / 4;
+                          for (int q = 0; q < 72; q++) fprintf(g_vtbl, " %g", f[q]);
+                      } else fprintf(g_vtbl, " -");
+                      fputc('\n', g_vtbl);
+                  }
+              }
+          }
       }
       static const char *dtx; static int dtx_n = -1; if (dtx_n < 0) { dtx = getenv("DM_NVN_DRAWTEX"); dtx_n = dtx && *dtx; }
       if (dtx_n && pr->sh[1] && !strncmp(pr->sh[1]->key, dtx, strlen(dtx))) {
@@ -6242,6 +6266,7 @@ static void td_dump(void) {
             if (f) { fprintf(f, "%llu %llu\n", (unsigned long long)g_vd_addr, (unsigned long long)sz);
                 fwrite((const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo, 1, (size_t)sz, f); fclose(f); }
             MLOG("[vbuf] 顶点缓冲 %#llx 大小 %llu → %s", (unsigned long long)g_vd_addr, (unsigned long long)sz, g_vd_path);
+            if (g_vtbl) { fclose(g_vtbl); g_vtbl = NULL; MLOG("[vbuf] 逐笔表已写出（%s.tbl）", g_vd_path); }
         } else MLOG("[vbuf] 顶点缓冲 %#llx 不在内存池", (unsigned long long)g_vd_addr);
         g_vd_on = 0;
     }
