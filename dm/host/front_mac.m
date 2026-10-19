@@ -91,6 +91,7 @@ static void *guest_tramp(void *p) {
 
 // Render scale menu (View menu): the game re-selects its resolution when it pops the notification dm_render_scale_set queues
 static void window_fit(NSWindow *w, double factor);
+static int g_resize_axis;   // which axis drives the 16:9 constraint for the current drag (1 = width, 2 = height)
 static int g_win_sized;   // the window has been sized to the picture (the game renders 1920x1080; 1:1 keeps the text pixel-exact)
 // Keep 16:9 while the user drags the corner: contentAspectRatio alone was not honoured here, the delegate always is
 @interface DMWinDelegate : NSObject <NSWindowDelegate>
@@ -99,19 +100,22 @@ static int g_win_sized;   // the window has been sized to the picture (the game 
 - (NSSize)windowWillResize:(NSWindow *)w toSize:(NSSize)fsz {
     if (w.styleMask & NSWindowStyleMaskFullScreen) return fsz;
     NSRect cur = w.frame;
-    // Which edge is being dragged? If the height moved more than the width (top / bottom edge), the height drives
-    // and the width follows; otherwise the width drives. Deriving the height from the width always made vertical
-    // drags a no-op.
+    // Which axis drives? Deciding per event made corner drags alternate between the two corrections on every
+    // mouse move (the window visibly jittered), so the choice is made once per drag and only changes when the
+    // other axis clearly takes over.
     double dw = fabs(fsz.width - cur.size.width), dh = fabs(fsz.height - cur.size.height);
+    if (!g_resize_axis) g_resize_axis = (dh > dw) ? 2 : 1;
+    else if (g_resize_axis == 1 && dh > dw * 1.6) g_resize_axis = 2;
+    else if (g_resize_axis == 2 && dw > dh * 1.6) g_resize_axis = 1;
     NSRect c = [w contentRectForFrameRect:NSMakeRect(0, 0, fsz.width, fsz.height)];
     if (c.size.width < 64 || c.size.height < 36) return fsz;
     NSRect f;
-    if (dh > dw) {   // vertical drag
+    if (g_resize_axis == 2) {
         f = [w frameRectForContentRect:NSMakeRect(0, 0, c.size.height * 16.0 / 9.0, c.size.height)];
-    } else {         // horizontal drag
+    } else {
         f = [w frameRectForContentRect:NSMakeRect(0, 0, c.size.width, c.size.width * 9.0 / 16.0)];
     }
-    return f.size;
+    return NSMakeSize(round(f.size.width), round(f.size.height));   // integer points: no sub-point oscillation
 }
 @end
 @interface DMScaleTarget : NSObject
@@ -237,6 +241,7 @@ void front_run(void (*guest)(void)) {
             NSView *hit = theme ? [theme hitTest:[theme convertPoint:e.locationInWindow fromView:nil]] : nil;
             BOOL inView = (hit == v) || (hit && [hit isDescendantOf:v]);
             if (e.type == NSEventTypeLeftMouseDown) {   // the clicks we consume never reach AppKit, so activate here
+                g_resize_axis = 0;
                 if (!NSApp.isActive) [NSApp activateIgnoringOtherApps:YES];
                 if (!win.isKeyWindow) [win makeKeyAndOrderFront:nil];
                 NSButton *zoom = [win standardWindowButton:NSWindowZoomButton];
