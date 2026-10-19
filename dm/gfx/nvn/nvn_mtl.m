@@ -4946,6 +4946,22 @@ frz_plain:;
     __unsafe_unretained id<MTLRenderPipelineState> ps = cur_ps;
     if (!ps) { PDS("Z %llu 绘制跳过：没有渲染管线（顶点 %s 片元 %s）", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-"); return; }
     { static int dl = -1; if (dl < 0) dl = getenv("DM_NVN_DRAWLOG") != NULL;
+      { static int zt = -1; static uint64_t seen[512]; static int ns;
+        if (zt < 0) zt = getenv("DM_NVN_ZEROTEX") != NULL;
+        if (zt && pr->sh[1]) { __unsafe_unretained NvShader *s1 = pr->sh[1];
+            for (int i = 0; i < s1->rf.nb; i++) { const nvn_rbind *b = &s1->rf.b[i];
+                if (b->kind != NVN_RB_TEX || b->reg >= 128) continue;
+                uint64_t hh = S.tex[1][b->reg]; int tid = (int)(hh & 0xfffff); if (!tid) continue;
+                pthread_mutex_lock(&g_rmu); const tex_t *t = (tid < g_ntreg && g_treg[tid].ok) ? &g_treg[tid].t : NULL;
+                uint64_t ser = t ? t->serial : 0; const uint8_t *mem = t ? (const uint8_t *)t->mem : NULL; uint64_t sz = t ? t->L.size : 0;
+                int known = 0; for (int k = 0; k < ns; k++) if (seen[k] == ser) { known = 1; break; }
+                if (!known && ser && ns < 512) seen[ns++] = ser;
+                if (!known && mem && sz) { int nz = 0;
+                    for (uint64_t o = 0; o < sz && o < (16u << 20) && !nz; o += 4096) for (int q = 0; q < 64; q++) if (mem[o + q]) { nz = 1; break; }
+                    if (!nz) LOG("[zerotex] 通道 %llu 绘制的贴图全零 ser=%llu reg=%d 格式=%#x %ux%u 存储=%llu", g_stat_pass, (unsigned long long)ser, b->reg,
+                                 t->d.format, t->d.width, t->d.height, (unsigned long long)sz); }
+                pthread_mutex_unlock(&g_rmu);
+            } } }
       static const char *dtx; static int dtx_n = -1; if (dtx_n < 0) { dtx = getenv("DM_NVN_DRAWTEX"); dtx_n = dtx && *dtx; }
       if (dtx_n && pr->sh[1] && !strncmp(pr->sh[1]->key, dtx, strlen(dtx))) {
           __unsafe_unretained NvShader *s1 = pr->sh[1];
