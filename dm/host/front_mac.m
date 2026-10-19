@@ -98,10 +98,19 @@ static int g_win_sized;   // the window has been sized to the picture (the game 
 @implementation DMWinDelegate
 - (NSSize)windowWillResize:(NSWindow *)w toSize:(NSSize)fsz {
     if (w.styleMask & NSWindowStyleMaskFullScreen) return fsz;
+    NSRect cur = w.frame;
+    // Which edge is being dragged? If the height moved more than the width (top / bottom edge), the height drives
+    // and the width follows; otherwise the width drives. Deriving the height from the width always made vertical
+    // drags a no-op.
+    double dw = fabs(fsz.width - cur.size.width), dh = fabs(fsz.height - cur.size.height);
     NSRect c = [w contentRectForFrameRect:NSMakeRect(0, 0, fsz.width, fsz.height)];
-    if (c.size.width < 64) return fsz;
-    NSRect f = [w frameRectForContentRect:NSMakeRect(0, 0, c.size.width, c.size.width * 9.0 / 16.0)];
-    static int n; if (n++ < 5) LOG("[窗口] 拖拽约束 %.0fx%.0f → %.0fx%.0f", fsz.width, fsz.height, f.size.width, f.size.height);
+    if (c.size.width < 64 || c.size.height < 36) return fsz;
+    NSRect f;
+    if (dh > dw) {   // vertical drag
+        f = [w frameRectForContentRect:NSMakeRect(0, 0, c.size.height * 16.0 / 9.0, c.size.height)];
+    } else {         // horizontal drag
+        f = [w frameRectForContentRect:NSMakeRect(0, 0, c.size.width, c.size.width * 9.0 / 16.0)];
+    }
     return f.size;
 }
 @end
@@ -227,7 +236,9 @@ void front_run(void (*guest)(void)) {
             NSView *theme = win.contentView.superview;
             NSView *hit = theme ? [theme hitTest:[theme convertPoint:e.locationInWindow fromView:nil]] : nil;
             BOOL inView = (hit == v) || (hit && [hit isDescendantOf:v]);
-            if (e.type == NSEventTypeLeftMouseDown) {
+            if (e.type == NSEventTypeLeftMouseDown) {   // the clicks we consume never reach AppKit, so activate here
+                if (!NSApp.isActive) [NSApp activateIgnoringOtherApps:YES];
+                if (!win.isKeyWindow) [win makeKeyAndOrderFront:nil];
                 NSButton *zoom = [win standardWindowButton:NSWindowZoomButton];
                 if (zoom && !zoom.hidden && NSPointInRect(e.locationInWindow, [zoom convertRect:zoom.bounds toView:nil])) {
                     LOG("[窗口] 绿色按钮 → %s全屏", win.styleMask & NSWindowStyleMaskFullScreen ? "退出" : "进入");
