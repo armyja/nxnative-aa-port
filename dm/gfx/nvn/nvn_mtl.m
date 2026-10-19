@@ -2570,7 +2570,11 @@ static NvShader *shader_load(NSString *pc, int stage) {
 
 static int stage_of(NSString *zh) {
     if ([zh isEqualToString:@"顶点"]) return 0; if ([zh isEqualToString:@"像素"]) return 1; if ([zh isEqualToString:@"计算"]) return 5;
-    if ([zh isEqualToString:@"外壳"]) return 3; if ([zh isEqualToString:@"域"]) return 4; return -1;
+    if ([zh isEqualToString:@"外壳"]) return 3; if ([zh isEqualToString:@"域"]) return 4;
+    // Newer shader_split.py writes English stage names ("vertex", "pixel", ...); a host built before that change
+    // would reject every row of such a map and log 「加载失败」 for each shader.
+    if ([zh isEqualToString:@"vertex"]) return 0; if ([zh isEqualToString:@"pixel"]) return 1; if ([zh isEqualToString:@"compute"]) return 5;
+    if ([zh isEqualToString:@"hull"]) return 3; if ([zh isEqualToString:@"domain"]) return 4; return -1;
 }
 #define NVN_RT_RANGE_RO_IMPL 1
 // Private continuation accepts only B reflection that is explicitly RO; a missing rw on sbuf does not let the default 0 count as proof; does not change the existing reflection / translation chain.

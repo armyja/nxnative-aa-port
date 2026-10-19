@@ -157,6 +157,44 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         fprintf(stderr, "[dm] fp=%#llx  sp 下方 0x100 字节:", (unsigned long long)uc->uc_mcontext->__ss.__fp);
         for (int i = -32; i < 0 && sp && !(sp & 7); i++) fprintf(stderr, "%s%llx", (i + 32) % 4 ? " " : "\n[dm]   ", (unsigned long long)((uint64_t *)sp)[i]);
         fputc('\n', stderr); }
+    if (getenv("DM_CRASH_OBJ")) {   // IL2CPP: 对象 +0 是 Il2CppClass*，类名在 +0x10、命名空间在 +0x18（崩溃调查用）
+        uint64_t o = uc->uc_mcontext->__ss.__x[19];
+        if (o > 0x10000000ull) {
+            uint64_t klass = 0, nptr = 0, nsp = 0; vm_size_t got = 0;
+            if (!vm_read_overwrite(mach_task_self(), (vm_address_t)o, 8, (vm_address_t)&klass, &got) && got == 8 && klass > 0x10000000ull) {
+                char nm[160] = {0}, ns[160] = {0};
+                if (!vm_read_overwrite(mach_task_self(), (vm_address_t)(klass + 0x10), 8, (vm_address_t)&nptr, &got) && got == 8 && nptr > 0x10000000ull)
+                    vm_read_overwrite(mach_task_self(), (vm_address_t)nptr, sizeof nm - 1, (vm_address_t)nm, &got);
+                if (!vm_read_overwrite(mach_task_self(), (vm_address_t)(klass + 0x18), 8, (vm_address_t)&nsp, &got) && got == 8 && nsp > 0x10000000ull)
+                    vm_read_overwrite(mach_task_self(), (vm_address_t)nsp, sizeof ns - 1, (vm_address_t)ns, &got);
+                fprintf(stderr, "[dm] x19 对象类：%s.%s（klass=%#llx）\n", ns, nm, (unsigned long long)klass);
+                // 逐个字段：指向托管对象的字段打印它的类名（IL2CPP 对象 +0 是 Il2CppClass*）
+                for (int i = 0; i < 32; i++) {
+                    uint64_t v = 0, k2 = 0, np2 = 0, ns2 = 0; vm_size_t g2 = 0;
+                    if (vm_read_overwrite(mach_task_self(), (vm_address_t)(o + i * 8), 8, (vm_address_t)&v, &g2) || g2 != 8 || v <= 0x10000000ull) continue;
+                    if (vm_read_overwrite(mach_task_self(), (vm_address_t)v, 8, (vm_address_t)&k2, &g2) || g2 != 8 || k2 <= 0x10000000ull) continue;
+                    if (vm_read_overwrite(mach_task_self(), (vm_address_t)(k2 + 0x10), 8, (vm_address_t)&np2, &g2) || g2 != 8 || np2 <= 0x10000000ull) continue;
+                    char cn[160] = {0}, cs[160] = {0};
+                    if (vm_read_overwrite(mach_task_self(), (vm_address_t)np2, sizeof cn - 1, (vm_address_t)cn, &g2)) cn[0] = 0;
+                    if (!vm_read_overwrite(mach_task_self(), (vm_address_t)(k2 + 0x18), 8, (vm_address_t)&ns2, &g2) && g2 == 8 && ns2 > 0x10000000ull)
+                        vm_read_overwrite(mach_task_self(), (vm_address_t)ns2, sizeof cs - 1, (vm_address_t)cs, &g2);
+                    if (cn[0] && (cn[0] & 0x80) == 0 && ((cn[0] >= 'A' && cn[0] <= 'Z') || (cn[0] >= 'a' && cn[0] <= 'z') || cn[0] == '_' || cn[0] == '<'))
+                        fprintf(stderr, "[dm]   +%#x → %s.%s\n", i * 8, cs, cn);
+                }
+            }
+        } }
+    if (getenv("DM_CRASH_OBJ")) {   // 打印 x19/x0 指向的对象及其虚表（崩溃调查用）
+        for (int r = 0; r < 2; r++) {
+            uint64_t o = uc->uc_mcontext->__ss.__x[r ? 0 : 19];
+            if (o < 0x10000000ull) continue;
+            fprintf(stderr, "[dm] 对象(x%d)=%#llx:", r ? 0 : 19, (unsigned long long)o);
+            for (int i = 0; i < 16; i++) {
+                uint64_t v = ((uint64_t *)o)[i]; module_t *m = module_of((void *)v);
+                fprintf(stderr, " %+d:%#llx%s", i * 8, (unsigned long long)v, m ? "→" : "");
+                if (m) fprintf(stderr, "%s+%#llx", m->name, (unsigned long long)(v - (uint64_t)m->base));
+            }
+            fputc('\n', stderr);
+        } }
     {   uint64_t sp = uc->uc_mcontext->__ss.__sp; int n = 0;
         fprintf(stderr, "[dm] 栈扫描 sp=%#llx:", (unsigned long long)sp);
         for (int i = -32; i < 512 && n < 24 && sp && !(sp & 7); i++) {
