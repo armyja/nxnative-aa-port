@@ -208,6 +208,7 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license; see [dm/th
 目录结构和每个环境变量在 [FORK-NOTES.md](FORK-NOTES.md) 里都有说明）：
 
 ```bash
+cd ~/projects/nxnative                       # 仓库根目录（含 dm/ 和 scripts/）
 B=~/projects/aa123/0100CB000A142000_build
 make -C dm/host GAME=0100CB000A142000 dmhost
 DM_WINDOW=1 DM_AUDIO=1 DM_MSL_DIR="$B/shader_cache" \
