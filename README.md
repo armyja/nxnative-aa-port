@@ -1,6 +1,6 @@
 # nxnative
 
-> **This fork**: **Ace Attorney 123 and Apollo Justice 456 (逆转裁判 123 / 456) are playable** on the Mac host and
+> **This fork**: **Ace Attorney 123 and Apollo Justice 456 are playable** on the Mac host and
 > in the iOS app — court scenes, cross-examination, the Court Record, the 3D evidence viewer and save/load all work.
 > This fork also carries the 123 save/load fix, XCI extraction support and the bring-up notes.
 > See [FORK-NOTES.md](FORK-NOTES.md). No game files, keys or extracted data are included here.
@@ -53,8 +53,8 @@ Both trilogies run on the Mac host (`dm/host/dmhost`) and in the iOS app:
 
 | Game | Title ID | NSPs to put in the folder | Notes |
 |---|---|---|---|
-| Phoenix Wright: Ace Attorney Trilogy (逆转裁判 123) | 0100CB000A142000 | base game + update 1.1.0 | Save/load fixed in this fork; keyboard, controller and mouse (as touch) input |
-| Apollo Justice: Ace Attorney Trilogy (逆转裁判 456) | 010020D01B890000 | base game + update 1.0.0 | Court Record with the 3D evidence viewer, save/load, 30 fps; renders natively at 1920×1080, `DM_GAME_RES=2560x1440` raises the internal resolution |
+| Phoenix Wright: Ace Attorney Trilogy | 0100CB000A142000 | base game + update 1.1.0 | Save/load fixed in this fork; keyboard, controller and mouse (as touch) input |
+| Apollo Justice: Ace Attorney Trilogy | 010020D01B890000 | base game + update 1.0.0 | Court Record with the 3D evidence viewer, save/load, 30 fps; renders natively at 1920×1080, `DM_GAME_RES=2560x1440` raises the internal resolution |
 
 How to run them on a Mac (`B` is the build directory the extraction step wrote for that title, e.g.
 `~/projects/aa123/0100CB000A142000_build` — the layouts and every variable are listed in
@@ -82,9 +82,9 @@ dm/host/dmhost "$B/patched_v65536"
 
 | | |
 |:---:|:---:|
-| ![Ace Attorney 123 — court lobby](docs/images/aa123_lobby.jpg)<br>逆转裁判 123 — court lobby | ![Ace Attorney 123 — save/load](docs/images/aa123_load.jpg)<br>逆转裁判 123 — save/load |
-| ![Apollo Justice 456 — cross-examination](docs/images/aa456_dialogue.jpg)<br>逆转裁判 456 — cross-examination | ![Apollo Justice 456 — Court Record](docs/images/aa456_record.jpg)<br>逆转裁判 456 — Court Record (evidence details) |
-| ![Apollo Justice 456 — 3D evidence](docs/images/aa456_evidence.jpg)<br>逆转裁判 456 — 3D evidence viewer | ![Apollo Justice 456 — pause menu](docs/images/aa456_menu.jpg)<br>逆转裁判 456 — pause menu |
+| ![Ace Attorney 123 — court lobby](docs/images/aa123_lobby.jpg)<br>Ace Attorney 123 — court lobby | ![Ace Attorney 123 — save/load](docs/images/aa123_load.jpg)<br>Ace Attorney 123 — save/load |
+| ![Apollo Justice 456 — cross-examination](docs/images/aa456_dialogue.jpg)<br>Ace Attorney 456 — cross-examination | ![Apollo Justice 456 — Court Record](docs/images/aa456_record.jpg)<br>Ace Attorney 456 — Court Record (evidence details) |
+| ![Apollo Justice 456 — 3D evidence](docs/images/aa456_evidence.jpg)<br>Ace Attorney 456 — 3D evidence viewer | ![Apollo Justice 456 — pause menu](docs/images/aa456_menu.jpg)<br>Ace Attorney 456 — pause menu |
 
 Needs iOS / iPadOS 26 or later. Other games aren't supported yet. For them the script writes a survey and still tries its best to pack an IPA, guessing the game's settings; such an IPA may not start.
 

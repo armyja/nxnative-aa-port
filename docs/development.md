@@ -110,7 +110,7 @@ The lines name shaders by content key and hold no compiled code and nothing pers
 2. Append the recorded lines below the header comments, in the recorded order. Duplicates are dropped at load.
 3. Rebuild the IPA.
 
-Record on the game version you ship. At launch the log names each list it read and its line count (`管线预热清单 … 行`), or says that `pso_user.tsv` does not exist yet.
+Record on the game version you ship. At launch the log names each list it read and its line count ("pipeline warm-up list … lines"), or says that `pso_user.tsv` does not exist yet.
 
 ## Game notes
 
