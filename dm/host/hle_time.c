@@ -59,6 +59,15 @@ HLE_FORCE("_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyCl
     int64_t s = (int64_t)(clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1000000000ull);
     memcpy(out, &s, 8); memcpy(out + 8, "dmhost-steady-01", 16); return RES_OK;
 }
+// 时钟上下文（时区偏移 + 时间点）：不接管的话 SDK 会去连 time 服务的 IPC，失败后返回全 0 的上下文，
+// 存档界面就把时间显示成 0001-01-01（御剑精选集的存档时间戳就是从这里算的）。宿主按本地时区给出。
+typedef struct { int64_t offset; int64_t time_point; uint8_t source_id[16]; } SystemClockContextDM;
+HLE_FORCE("_ZN2nn4time23StandardUserSystemClock21GetSystemClockContextEPNS0_18SystemClockContextE", "用户时钟上下文 → 宿主本地时区", Result, h_time_GetContext, void *out) {
+    time_t t = time(NULL); struct tm tm; localtime_r(&t, &tm);
+    SystemClockContextDM c = { .offset = (int64_t)tm.tm_gmtoff, .time_point = (int64_t)t, .source_id = {0} };
+    if (out) memcpy(out, &c, sizeof c);
+    return RES_OK;
+}
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "用户时钟 → 宿主 time()", Result, h_time_GetCurrentTime, int64_t *out) {
     int64_t ft = fixed_time(); *out = ft >= 0 ? ft : time(NULL);
     if (getenv("DM_TIMELOG")) { static int n; if (n++ < 8) LOG("timelog GetCurrentTime → %lld", (long long)*out); }
