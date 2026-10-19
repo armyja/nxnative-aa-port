@@ -1465,6 +1465,18 @@ int nvn_vmap_dirty_probe(const void *addr, size_t len, uint64_t stamp) {
     return hit;
 }
 // DM_TEXDUMP_MEM companion: report the mapping that covers p, and how much of its virtual / physical sides is non-zero (sampled per 4 KB page)
+// Translate a virtual-pool address to the aliased physical pool's host pointer. The GPU can only address registered memory pools, so
+// the replay layer asks this when a buffer address falls outside every pool (AA456's evidence models keep their per-instance matrices
+// in a virtual pool; without the translation the vertex shader read a dummy zero buffer and the model collapsed).
+int nvn_vmap_host(const void *p, const void **host) {
+    pthread_mutex_lock(&g_vmap_mu);
+    int ok = 0;
+    for (int i = 0; i < g_nvmap; i++) { const vmap_ent *e = &g_vmap[i];
+        if ((const uint8_t *)p >= e->vaddr && (const uint8_t *)p < e->vaddr + e->size) {
+            *host = e->phys + ((const uint8_t *)p - e->vaddr); ok = 1; break; } }
+    pthread_mutex_unlock(&g_vmap_mu);
+    return ok;
+}
 void nvn_vmap_probe(const void *p, uint64_t n) {
     pthread_mutex_lock(&g_vmap_mu);
     for (int i = 0; i < g_nvmap; i++) {

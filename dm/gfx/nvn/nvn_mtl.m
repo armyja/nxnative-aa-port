@@ -386,10 +386,19 @@ static int pool_find(uint64_t addr, uint64_t len) {
     for (int i = 0; i < g_npool; i++) if (addr >= g_pools[i].lo && addr + len <= g_pools[i].hi) return g_plast = i;
     return -1;
 }
+// A virtual-pool address is aliased page-by-page onto another pool's memory: translate it to that pool's host pointer first
+extern int nvn_vmap_host(const void *p, const void **host);
+static uint64_t vmap_xlate(uint64_t addr) {
+    const void *h = NULL;
+    if (nvn_vmap_host((const void *)(uintptr_t)addr, &h) && h) return (uint64_t)(uintptr_t)h;
+    return 0;
+}
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     int ok = 0;
     pthread_mutex_lock(&g_mu);
     int i = pool_find(addr, len);
+    if (i < 0) i = pool_find(addr, 1);   // a binding may span several adjacent virtual mappings: bind the mapping that holds its start
+    if (i < 0) { uint64_t h = vmap_xlate(addr); if (h) { i = pool_find(h, len); if (i >= 0) addr = h; } }
     if (i >= 0) { pool_res(i); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; ok = 1; }
     pthread_mutex_unlock(&g_mu);
     return ok;
@@ -398,6 +407,8 @@ int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_
     int ok = 0;
     pthread_mutex_lock(&g_mu);
     int i = pool_find(addr, len);
+    if (i < 0) i = pool_find(addr, 1);   // a binding may span several adjacent virtual mappings: bind the mapping that holds its start
+    if (i < 0) { uint64_t h = vmap_xlate(addr); if (h) { i = pool_find(h, len); if (i >= 0) addr = h; } }
     if (i >= 0) { pool_res(i); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; *gpu = g_pools[i].gpu + *off; ok = 1; }
     pthread_mutex_unlock(&g_mu);
     return ok;
@@ -4945,6 +4956,10 @@ frz_plain:;
               LOG("[drawtex] %s reg=%d 句柄=%#llx tid=%d 序号=%llu 格式=%#x %ux%u 级=%u", s1->key, b->reg, (unsigned long long)hh, tid,
                   t ? (unsigned long long)t->serial : 0ull, t ? t->d.format : 0u, t ? t->d.width : 0u, t ? t->d.height : 0u, t ? t->d.levels : 0u);
               pthread_mutex_unlock(&g_rmu); }
+          { static int sb = -1; if (sb < 0) sb = getenv("DM_NVN_DRAWTEX") != NULL;
+            if (sb && pr->sh[0]) for (int r = 0; r < 4; r++) { const p_bind_buf *u = &S.ssbo[0][r]; if (!u->addr) continue;
+                void *mb; uint64_t mo, gpu; int ok = mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu);
+                LOG("[drawtex]   顶点存储缓冲 r%d addr=%#llx size=%llu 解析=%d", r, (unsigned long long)u->addr, (unsigned long long)u->size, ok); } }
           { int shown = 0; for (int r = 0; r < 128; r++) { uint64_t hh = S.tex[1][r]; if (!hh) continue; int tid = (int)(hh & 0xfffff); if (!tid) continue;
               pthread_mutex_lock(&g_rmu); const tex_t *t = (tid > 0 && tid < g_ntreg && g_treg[tid].ok) ? &g_treg[tid].t : NULL;
               LOG("[drawtex]   槽 %d 句柄=%#llx tid=%d 序号=%llu 格式=%#x %ux%u", r, (unsigned long long)hh, tid,
@@ -4956,7 +4971,12 @@ frz_plain:;
     if (ps != g_enc_pso) { enc_r_pso(en, ps); g_enc_pso = ps; }
     static id<MTLDepthStencilState> cur_ds; static uint64_t cur_ds_pass;
     if (g_dss_dirty || cur_ds_pass != g_pass.serial) { cur_ds = dss_get(g_pass.hd, g_pass.hs); cur_ds_pass = g_pass.serial; g_dss_dirty = 0; }
-    if (cur_ds != g_enc_dss) { enc_r_dss(en, cur_ds); g_enc_dss = cur_ds; }
+    { static const char *nd; static int nd_n = -1; static id<MTLDepthStencilState> ds_always;
+      if (nd_n < 0) { nd = getenv("DM_NVN_NODEPTH"); nd_n = nd && *nd; }
+      if (nd_n && pr->sh[1] && !strncmp(pr->sh[1]->key, nd, strlen(nd))) {
+          if (!ds_always) { MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionAlways; dd.depthWriteEnabled = NO; ds_always = [g_dev newDepthStencilStateWithDescriptor:dd]; }
+          if (ds_always != g_enc_dss) { enc_r_dss(en, ds_always); g_enc_dss = ds_always; }
+      } else if (cur_ds != g_enc_dss) { enc_r_dss(en, cur_ds); g_enc_dss = cur_ds; } }
     if (g_rt_ovr && g_pass.hs) enc_r_stencil_ref(en, g_rt_ovr == 3 ? 0x40 : 0, 0); else enc_r_stencil_ref(en, S.st_ref[0], S.st_ref[1]);
     // Viewport / scissor (clamped within the target size)
     NSUInteger tw = g_pass.tw, th = g_pass.th;
