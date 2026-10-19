@@ -3,3 +3,7 @@
 .iosdd_mac/
 .iosdd_*/
 .DS_Store
+
+# Stray output redirected into the repository root (e.g. a diagnostic run `... > 1`)
+/[0-9]*
+/*.log
