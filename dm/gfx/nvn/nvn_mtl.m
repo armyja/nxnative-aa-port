@@ -2432,6 +2432,8 @@ void mtl_watch_tex(uint64_t off) {
                 for (uint64_t k = a; k < b2; k++) seg[g] += r->t.mem[k] != 0; }
             MLOG("[texwatch] 第 %d 次出图：ser=%llu %ux%u 段非零 %llu / %llu / %llu / %llu", tick, (unsigned long long)r->t.serial, r->t.d.width, r->t.d.height,
                  (unsigned long long)seg[0], (unsigned long long)seg[1], (unsigned long long)seg[2], (unsigned long long)seg[3]);
+            if (getenv("DM_TEXWATCH_DUMP")) { static int d2; const char *dp = getenv("DM_TEXWATCH_DUMP"); if (dp && *dp && !d2 && r->t.mem) { d2 = 1; FILE *f = fopen(dp, "wb");
+                    if (f) { fwrite(r->t.mem, 1, (size_t)(r->t.L.size > (32u << 20) ? (32u << 20) : r->t.L.size), f); fclose(f); MLOG("[texwatch] 存盘 %s", dp); } } }
             continue;
         }
         tex_t *t = &r->t; uint64_t nz = 0, sz = t->L.size;
@@ -5044,6 +5046,9 @@ frz_plain:;
                               for (int q = 0; q < n; q++) fprintf(g_vtbl, " %g", f[q]);
                           } else fprintf(g_vtbl, " 0");
                       }
+                      { int nt = 0; for (int rg = 0; rg < 8; rg++) { uint64_t h2 = S.tex[1][rg]; int t2 = (int)(h2 & 0xfffff);
+                          uint64_t s2 = (t2 > 0 && t2 < (1 << 20)) ? atomic_load_explicit(&g_tser[t2], memory_order_relaxed) : 0;
+                          if (s2) { fprintf(g_vtbl, " #%d:%llu", rg, (unsigned long long)s2); nt++; } } }
                       fputc('\n', g_vtbl);
                   }
               }
