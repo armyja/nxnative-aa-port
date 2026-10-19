@@ -24,21 +24,21 @@ void dm_uiscreen_res_reread(void) {}
 // Render scale: multiplies the resolution the game renders at (1.0 = the game's own resolution). The game profile's
 // render_scale sets the default, DM_RENDER_SCALE overrides it; changing it at run time calls dm_oe_res_changed(), which
 // queues the "performance mode changed" notification the game answers by re-reading the resolution parameter slots.
-static _Atomic uint32_t g_rs_bits;   // double bits; 0 = not read yet
+static _Atomic float g_rs;   // 0 = not read yet
 static double rs_value(void) {
-    uint32_t b = atomic_load(&g_rs_bits);
-    if (!b) {
-        double v = DM_GAME_RENDER_SCALE;
+    float v = atomic_load(&g_rs);
+    if (v == 0) {
+        double d = DM_GAME_RENDER_SCALE;
         const char *e = getenv("DM_RENDER_SCALE");
-        if (e && *e) { double x = atof(e); if (x > 0.1 && x < 8.0) v = x; }
-        memcpy(&b, &v, sizeof b); atomic_store(&g_rs_bits, b);
+        if (e && *e) { double x = atof(e); if (x > 0.1 && x < 8.0) d = x; }
+        v = (float)d; atomic_store(&g_rs, v);
     }
-    double d; memcpy(&d, &b, sizeof d); return d;
+    return (double)v;
 }
 double dm_render_scale(void) { return rs_value(); }
 void dm_render_scale_set(double v) {
     if (!(v > 0.1 && v < 8.0)) return;
-    uint32_t b; memcpy(&b, &v, sizeof b); atomic_store(&g_rs_bits, b);
+    atomic_store(&g_rs, (float)v);
     LOG("[分辨率] 渲染缩放 → %.2f", v);
     void dm_oe_res_changed(void); dm_oe_res_changed();   // let the game re-select, if it enabled the notification
 }

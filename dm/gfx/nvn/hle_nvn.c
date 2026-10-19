@@ -21,7 +21,10 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
 #include <sys/mman.h>
+#include <unistd.h>
+#include <sys/mman.h>
 #include <mach/mach_vm.h>
+static void res_override_early(void);   // render resolution override, applied at the first NVN call
 #include <pthread.h>
 #include <TargetConditionals.h>
 #include <unistd.h>
@@ -109,7 +112,7 @@ HLE_FORCE("nvnBootstrapLoader", "NVN 图形接口整块换成宿主空设备（�
 #include "nvn_obj.h"
 
 // ---------- Device ----------
-NVN(nvnDeviceBuilderSetDefaults, void, NVNdeviceBuilder *b) { memset(b, 0, sizeof(dev_builder_t)); }
+NVN(nvnDeviceBuilderSetDefaults, void, NVNdeviceBuilder *b) { memset(b, 0, sizeof(dev_builder_t)); res_override_early(); }
 NVN(nvnDeviceBuilderSetFlags, void, NVNdeviceBuilder *b, int f) { ((dev_builder_t *)b)->flags = f; }
 NVN(nvnDeviceInitialize, NVNboolean, NVNdevice *d, const NVNdeviceBuilder *b) {
     dev_t_ *o = (dev_t_ *)d; memset(o, 0, sizeof *o);
@@ -1056,7 +1059,16 @@ NVN(nvnWindowInitialize, NVNboolean, NVNwindow *w, const NVNwindowBuilder *b) {
 }
 NVN(nvnWindowGetPresentInterval, int, const NVNwindow *w) { return ((const win_t *)w)->interval; }   // Link's Awakening reads it back every frame
 NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) { if (((win_t *)w)->interval != v) LOG("[nvn] 游戏设出图间隔 %d → %d", ((win_t *)w)->interval, v); ((win_t *)w)->interval = v; }
+static int sizetrace_want(void);
+// DM_NVN_SIZETRACE also logs these: the crop and the viewport carry the same 1920x1080 choice
+static void sizetrace_rect(const char *what, int x, int y, int w, int h, void *lr) {
+    static int n; if (n >= sizetrace_want() * 4) return; n++;
+    module_t *m = lr ? module_of(lr) : NULL;
+    if (m) LOG("[sizetrace] %s %d,%d %dx%d 调用点 %s+%#llx", what, x, y, w, h, m->name, (unsigned long long)((uint8_t *)lr - m->base));
+    else LOG("[sizetrace] %s %d,%d %dx%d 调用点 宿主", what, x, y, w, h);
+}
 NVN(nvnWindowSetCrop, void, NVNwindow *w, int x, int y, int ww, int hh) {
+    if (sizetrace_want()) sizetrace_rect("crop", x, y, ww, hh, __builtin_return_address(0));
     win_t *o = (win_t *)w; int v[4] = {x, y, ww, hh};
     if (memcmp(o->crop, v, sizeof v)) LOG("[nvn] WindowCrop %d,%d %dx%d", x, y, ww, hh);
     memcpy(o->crop, v, sizeof v);
@@ -1615,7 +1627,55 @@ NVN(nvnSamplerCompare, NVNboolean, const NVNsampler *a, const NVNsampler *b) {
 }
 
 // Texture builder / texture / view
-NVN(nvnTextureBuilderSetSize2D, void, NVNtextureBuilder *b, int w, int h) { TB(b)->d.width = w; TB(b)->d.height = h; TB(b)->d.depth = 1; }
+// DM_NVN_SIZETRACE=<count, default 0>: log texture builders with w or h >= 720 and the guest call site, to find where the game
+// picks its render sizes (the resolution override work); also logs the packed texture count of each 2D size once
+static void res_override_maybe(void);   // defined below with the size trace
+// ---------- Render resolution override (Astris/Ryujinx-style, host side) ----------
+// The game materializes its output size as two immediates while it builds the swapchain textures
+// (AA456 build dbe49182…: main+0x3806304 `movz w2,#0x438` = 1080 and main+0x3806310 `movz w1,#0x780` = 1920).
+// Patch them to the requested size before the first NVN call: the engine derives its crop, viewports and UI
+// canvas from the swapchain it created, so the whole picture (and the TTF-rendered text) follows.
+// DM_RENDER_SCALE / the profile's render_scale picks the multiplier; DM_GAME_RES does not reach the guest here.
+static int g_res_patched;
+static void patch_movz32(uint8_t *code, uint64_t off, uint32_t expect, uint32_t value, int rd) {
+    uint32_t *p = (uint32_t *)(code + off);
+    if (*p != expect) { LOG("【红】分辨率覆盖：%#llx 处的指令是 %08x 而不是 %08x，跳过", (unsigned long long)off, *p, expect); return; }
+    vm_size_t pg = (vm_size_t)sysconf(_SC_PAGESIZE); vm_address_t a = (vm_address_t)((uintptr_t)p & ~(uintptr_t)(pg - 1));
+    // The image is a file-backed read-only mapping: mprotect() cannot make it writable, the page has to be made private first
+    kern_return_t kr = vm_protect(mach_task_self(), a, pg, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) { LOG("【红】分辨率覆盖：%#llx 页改成可写失败（%d）", (unsigned long long)off, (int)kr); return; }
+    uint32_t enc = 0x52800000u | ((uint32_t)(value & 0xffff) << 5) | (uint32_t)(rd & 31);   // MOVZ Wd, #imm16
+    *p = enc;
+    vm_protect(mach_task_self(), a, pg, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    __builtin___clear_cache((char *)p, (char *)p + 4);
+}
+static void res_override_early(void) { res_override_maybe(); }
+static void res_override_maybe(void) {
+    if (g_res_patched) return;
+    g_res_patched = 1;
+    LOG("[分辨率] 覆盖检查：build=%s", dm_main_build());
+    if (strcmp(dm_main_build(), "dbe49182fbca27691c65b23c9e105d1f")) return;   // addresses below belong to this build only
+    int w = 1920, h = 1080;
+    { uint64_t r = front_game_res(1); double sc = dm_render_scale();   // profile render_scale / DM_RENDER_SCALE
+      if (sc > 0.1 && (sc < 0.999 || sc > 1.001)) { w = (int)((double)w * sc + 0.5); h = (int)((double)h * sc + 0.5); }
+      (void)r; }
+    LOG("[分辨率] 想要 %dx%d（缩放 %.3f）", w, h, dm_render_scale());
+    if (w <= 0 || h <= 0 || (w == 1920 && h == 1080) || w > 4096 || h > 4096 || (w & 0xffff0000) || (h & 0xffff0000)) return;
+    uint8_t *base = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) base = g_mod[i].base;
+    if (!base) return;
+    patch_movz32(base, 0x3806310, 0x5280f001u, (uint32_t)w, 1);   // w1 = width
+    patch_movz32(base, 0x3806304, 0x52808702u, (uint32_t)h, 2);   // w2 = height
+    LOG("[分辨率] 覆盖交换链尺寸 → %dx%d（%s）", w, h, getenv("DM_RENDER_SCALE") ? "DM_RENDER_SCALE" : "档案 render_scale");
+}
+static int sizetrace_want(void) { static int n = -1; if (n < 0) { const char *e = getenv("DM_NVN_SIZETRACE"); n = e ? atoi(e) : 0; } return n; }
+static void sizetrace_tex(int w, int h, void *lr) {
+    static int n; if (n >= sizetrace_want()) return; n++;
+    module_t *m = lr ? module_of(lr) : NULL;
+    if (m) LOG("[sizetrace] %dx%d 调用点 %s+%#llx", w, h, m->name, (unsigned long long)((uint8_t *)lr - m->base));
+    else LOG("[sizetrace] %dx%d 调用点 宿主", w, h);
+}
+NVN(nvnTextureBuilderSetSize2D, void, NVNtextureBuilder *b, int w, int h) { TB(b)->d.width = w; TB(b)->d.height = h; TB(b)->d.depth = 1;
+    if (w >= 720 || h >= 720) { res_override_maybe(); sizetrace_tex(w, h, __builtin_return_address(0)); } }
 NVN(nvnTextureBuilderSetSize3D, void, NVNtextureBuilder *b, int w, int h, int d) { TB(b)->d.width = w; TB(b)->d.height = h; TB(b)->d.depth = d; }
 NVN(nvnTextureBuilderSetSwizzle, void, NVNtextureBuilder *b, NVNtextureSwizzle r, NVNtextureSwizzle g, NVNtextureSwizzle bl, NVNtextureSwizzle a) {
     tex_builder_t *o = (tex_builder_t *)b; o->set_swz = 1; o->swz = (uint16_t)((r & 7) | (g & 7) << 3 | (bl & 7) << 6 | (a & 7) << 9);
@@ -1727,7 +1787,9 @@ NVN(nvnCommandBufferMultiDrawArraysIndirectCount, void, NVNcommandBuffer *c, NVN
 }
 
 // Viewport / scissor / depth range: single and multiple forms
-NVN(nvnCommandBufferSetViewport, void, NVNcommandBuffer *c, int x, int y, int w, int h) { float v[4] = {(float)x, (float)y, (float)w, (float)h}; h_nvnCommandBufferSetViewports(c, 0, 1, v); }
+NVN(nvnCommandBufferSetViewport, void, NVNcommandBuffer *c, int x, int y, int w, int h) { float v[4] = {(float)x, (float)y, (float)w, (float)h};
+    if (sizetrace_want() > 0 && sizetrace_want() <= 1000000) { static int n; if (n < 200 && (w >= 720 || h >= 720)) { n++; module_t *m = module_of(__builtin_return_address(0)); if (m) LOG("[sizetrace] viewport %d,%d %dx%d 调用点 %s+%#llx", x, y, w, h, m->name, (unsigned long long)((uint8_t *)__builtin_return_address(0) - m->base)); } }
+    h_nvnCommandBufferSetViewports(c, 0, 1, v); }
 NVN(nvnCommandBufferSetScissors, void, NVNcommandBuffer *c, int first, int n, const int *r) {
     if (first == 0 && n >= 1) h_nvnCommandBufferSetScissor(c, r[0], r[1], r[2], r[3]);
     if (first + n > 1) ONCE_LOG("SetScissors first=%d n=%d：宿主只用 0 号", first, n);

@@ -260,8 +260,11 @@ HLE_FORCE("_ZN2nn2oe27GetNotificationMessageEventEv", "系统通知事件；用 
 }
 // Display resolution: the device values (the window is 1920x1080, see [nvn] WindowInitialize). Requested through am's CommonStateGetter; the host has no am,
 // and the SDK getter returns null, which RE Engine dereferences right after creating the swapchain (main+0x37fb69c → sdk+0x39b370).
-HLE_FORCE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", "默认显示分辨率；宿主报 1920x1080（与窗口一致）", void, h_oe_DefRes, int *w, int *h) {
-    if (w) *w = 1920; if (h) *h = 1080;
+HLE_FORCE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", "默认显示分辨率；宿主报 1920x1080（与窗口一致），DM_DISPLAY_RES 可改（RE Engine 按它定交换链与渲染尺寸）", void, h_oe_DefRes, int *w, int *h) {
+    static int dw = -1, dh;   // DM_DISPLAY_RES=<w>x<h>: the game sizes its swapchain from this, so a larger value renders (and presents) larger
+    if (dw < 0) { dw = 1920; dh = 1080; const char *e = getenv("DM_DISPLAY_RES"); unsigned a = 0, b = 0;
+        if (e && sscanf(e, "%ux%u", &a, &b) == 2 && a >= 320 && a <= 4096 && b >= 240 && b <= 2160) { dw = (int)a; dh = (int)b; LOG("[显示] 默认显示分辨率 → %dx%d（DM_DISPLAY_RES）", dw, dh); } }
+    if (w) *w = dw; if (h) *h = dh;
 }
 HLE_FORCE("_ZN2nn2oe38GetDefaultDisplayResolutionChangeEventEPNS_2os11SystemEventE", "分辨率变化事件；建一个宿主事件（永不触发）", unsigned, h_oe_ResChangeEvent, void *ev) {
     host_system_event(ev); return 0;
