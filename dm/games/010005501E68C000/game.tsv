@@ -29,6 +29,9 @@ mem_reserve	0x180000000
 mem_alias	0x118000000
 mem_stack	0x10000000
 app_pool	0xA0000000
+# Unity's .NET/font engine uses nn::os::AllocateMemoryBlock, which needs the loader to have sized the heap (the game never
+# calls SetHeapSize): hand out 1 GB at the first svc, like the real loader does. Other profiles leave this at 0.
+heap_default	0x40000000
 
 # ---- NVN driver constant segments（先照 AA456 的基址，跑起来再看日志修正）----
 nvn_tex_base	0x168

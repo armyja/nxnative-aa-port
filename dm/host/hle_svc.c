@@ -56,7 +56,9 @@ static void mem_init(void) {
 // 16 MB 缓冲区上（TextMeshPro → FontEngine.GetLigatureSubstitutionRecords → 分配返回 null → 写空指针 main+0x40c47c）。
 void dm_heap_init_default(void) {
     static int done; if (done || !g_heap) return; done = 1;
-    size_t want = APP_POOL; if (want > g_heap_cap) want = g_heap_cap;
+    size_t want = DM_GAME_HEAP_DEFAULT;   // profile: 0 = the title sizes the heap itself (RE Engine and friends do)
+    if (!want) return;
+    if (want > g_heap_cap) want = g_heap_cap;
     size_t img = image_bytes(); want = img < want ? want - img : 0;
     if (!want) return;
     if (mprotect(g_heap, want, PROT_READ | PROT_WRITE)) { LOG("【红】默认堆 mprotect errno=%d", errno); return; }

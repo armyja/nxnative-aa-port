@@ -108,6 +108,7 @@ def header(g):
     if any(not re.fullmatch(r'[0-9a-f]{8,16}', k) for k in fbs): sys.exit(f'{g.id}: feedback_snap 要写片元着色器键（8–16 位小写十六进制）| feedback_snap takes fragment shader keys (8-16 lowercase hex digits): {fbs}')
     afr = g.words('alpha_from_red', '')   # fragment shader key prefixes that read single-channel textures mapped (R, 0, 0, 1) with alpha = red (nvn_mtl.m tex_alpha_red); none by default
     if any(not re.fullmatch(r'[0-9a-f]{8,16}', k) for k in afr): sys.exit(f'{g.id}: alpha_from_red 要写片元着色器键（8–16 位小写十六进制）| alpha_from_red takes fragment shader keys (8-16 lowercase hex digits): {afr}')
+    hd = g.get('heap_default', '0')   # bytes of the process heap the host hands out before the title calls SetHeapSize (0 = none): Unity's titles rely on the loader having sized the heap, RE Engine ones size it themselves
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api 要写成 主.次 | device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
@@ -123,6 +124,7 @@ def header(g):
          f'#define DM_GAME_MEM_ALIAS {g.int("mem_alias"):#x}ull',
          f'#define DM_GAME_MEM_STACK {g.int("mem_stack"):#x}ull',
          f'#define DM_GAME_APP_POOL {g.int("app_pool"):#x}ull',
+         f'#define DM_GAME_HEAP_DEFAULT {int(hd, 0):#x}ull',
          f'#define DM_GAME_NVN_SSBO_BASE(stage) ({sb})',
          f'#define DM_GAME_NVN_TEX_BASE {g.int("nvn_tex_base"):#x}',
          f'#define DM_GAME_NVN_TEX_SLOTS {g.int("nvn_tex_slots")}',

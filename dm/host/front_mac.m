@@ -212,6 +212,17 @@ void front_run(void (*guest)(void)) {
             return nil;   // Swallow it to avoid the system beep
         }];
         // Mouse as a single-point touchscreen (for testing touch on the local machine, front.h dm_touch_set): left button down / drag = finger 0 at the normalized coordinates, release = lifted
+        // Right button = the A button. Some of the Ace Attorney screens are button-only (the title menus answer a
+        // touch, but e.g. the "load this save?" confirmation does not), so a mouse-only player needs one more verb:
+        // right-click presses A, and the left button stays the touchscreen.
+        [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskRightMouseDown | NSEventMaskRightMouseUp handler:^NSEvent *(NSEvent *e) {
+            if (e.window != win) return e;
+            NSView *theme = win.contentView.superview;
+            NSView *hit = theme ? [theme hitTest:[theme convertPoint:e.locationInWindow fromView:nil]] : nil;
+            if (!((hit == v) || (hit && [hit isDescendantOf:v]))) return e;
+            if (e.type == NSEventTypeRightMouseDown) { if (!NSApp.isActive) [NSApp activateIgnoringOtherApps:YES]; dm_pad_set(1ull << 0, 0, 0, 0, 0); return nil; }
+            dm_pad_set(0, 0, 0, 0, 0); return nil;
+        }];
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;
             // Who owns the current drag: decided by where the button went down, not by where the cursor is now.
