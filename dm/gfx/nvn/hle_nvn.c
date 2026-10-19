@@ -415,6 +415,17 @@ static prog_keys_t *pk_get(const void *p, int make) {
     pthread_mutex_unlock(&g_pk_mu);
     return k;
 }
+// Diagnostic accessor for the replay layer: the shader key of one stage of a program as hex (NULL when the program has none there).
+// The table stores the 8 key bytes, not a string.
+const char *nvn_prog_key(const void *p, int stage) {
+    static char buf[6][24];
+    const prog_keys_t *k = pk_get(p, 0);
+    if (!k || !k->ok || stage < 0 || stage > 5) return NULL;
+    int any = 0; for (int i = 0; i < 8; i++) any |= k->key[stage][i];
+    if (!any) return NULL;
+    for (int i = 0; i < 8; i++) snprintf(buf[stage] + 2 * i, 3, "%02x", k->key[stage][i]);
+    return buf[stage];
+}
 static void pk_drop(const void *p) {
     pthread_mutex_lock(&g_pk_mu);
     prog_keys_t *k = g_pk ? (prog_keys_t *)CFDictionaryGetValue(g_pk, p) : NULL;

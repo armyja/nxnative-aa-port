@@ -5185,7 +5185,10 @@ static void dispatch(const p_dispatch *dp) {
     zskip_clear();
     if (!S.prog) { RED_ONCE(27, "派发前没有绑定程序"); return; }
     NvShader *cs = prog_get(S.prog)->sh[5];
-    if (!cs) { RED_ONCE(28, "派发的程序没有计算着色器（或未映射）"); return; }
+    if (!cs) { RED_ONCE(28, "派发的程序没有计算着色器（或未映射）");
+        if (getenv("DM_NVN_DISPATCHLOG")) { extern const char *nvn_prog_key(const void *, int);
+            LOG("[dispatch] 程序 %p 键：vs=%s ps=%s cs=%s", (void *)S.prog, nvn_prog_key(S.prog, 0) ?: "-", nvn_prog_key(S.prog, 1) ?: "-", nvn_prog_key(S.prog, 5) ?: "-"); }
+        return; }
     const void *k = (__bridge const void *)cs;
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
     if (!ps) {
